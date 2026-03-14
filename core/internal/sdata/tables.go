@@ -81,6 +81,8 @@ func GetDBInfo(
 			row = db.QueryRow(sqliteInfo)
 		case "oracle":
 			row = db.QueryRow(oracleInfo)
+		case "oracle11g":
+			row = db.QueryRow(oracle11gInfo)
 		case "mssql":
 			row = db.QueryRow(mssqlInfo)
 		case "snowflake":
@@ -89,13 +91,13 @@ func GetDBInfo(
 			// MongoDB returns info via the driver's introspection
 			row = db.QueryRow(mongodbInfo)
 		default:
-			return fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, mssql, snowflake, mongodb", dbType)
+			return fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, oracle11g, mssql, snowflake, mongodb", dbType)
 		}
 
 		if err := row.Scan(&dbVersion, &dbSchema, &dbName); err != nil {
 			return err
 		}
-		if dbType == "oracle" {
+		if dbType == "oracle" || dbType == "oracle11g" {
 			dbSchema = strings.ToLower(dbSchema)
 		}
 		return nil
@@ -278,30 +280,30 @@ func (di *DBInfo) GetTable(schema, table string) (*DBTable, error) {
 
 // DBColumn returns the column as a string
 type DBColumn struct {
-	Comment     string
-	ID          int32
-	Name        string
-	OrigName    string // Original name before normalization (e.g., PascalCase for MSSQL)
-	Type        string
-	Array       bool
-	NotNull     bool
-	PrimaryKey  bool
-	UniqueKey   bool
-	FullText    bool
+	Comment      string
+	ID           int32
+	Name         string
+	OrigName     string // Original name before normalization (e.g., PascalCase for MSSQL)
+	Type         string
+	Array        bool
+	NotNull      bool
+	PrimaryKey   bool
+	UniqueKey    bool
+	FullText     bool
 	FKRecursive  bool
 	FKeyDatabase string // Target database for cross-database FKs (empty = same db)
 	FKeySchema   string
 	FKeyTable    string
 	FKeyCol      string
-	Blocked     bool
-	Table       string
-	Schema      string
-	Database    string
-	Default     string
-	Index       bool
-	IndexName   string
-	FKOnDelete  string
-	FKOnUpdate  string
+	Blocked      bool
+	Table        string
+	Schema       string
+	Database     string
+	Default      string
+	Index        bool
+	IndexName    string
+	FKOnDelete   string
+	FKOnUpdate   string
 
 	// Original names before normalization (used to build dialect name maps for MSSQL)
 	OrigTable      string
@@ -326,6 +328,8 @@ func DiscoverColumns(db *sql.DB, dbtype string, blockList []string) ([]DBColumn,
 		sqlStmt = sqliteColumnsStmt
 	case "oracle":
 		sqlStmt = oracleColumnsStmt
+	case "oracle11g":
+		sqlStmt = oracle11gColumnsStmt
 	case "mssql":
 		sqlStmt = mssqlColumnsStmt
 	case "snowflake":
@@ -334,7 +338,7 @@ func DiscoverColumns(db *sql.DB, dbtype string, blockList []string) ([]DBColumn,
 		// MongoDB uses JSON query DSL - the driver handles introspection
 		sqlStmt = mongodbColumnsStmt
 	default:
-		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, mssql, snowflake, mongodb", dbtype)
+		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, oracle11g, mssql, snowflake, mongodb", dbtype)
 	}
 
 	rows, err := db.Query(sqlStmt)
@@ -374,7 +378,7 @@ func DiscoverColumns(db *sql.DB, dbtype string, blockList []string) ([]DBColumn,
 			return nil, err
 		}
 
-		if dbtype == "mssql" {
+		if dbtype == "mssql" || dbtype == "oracle" || dbtype == "oracle11g" {
 			c.OrigName = c.Name
 			c.OrigTable = c.Table
 			c.OrigSchema = c.Schema
@@ -383,7 +387,7 @@ func DiscoverColumns(db *sql.DB, dbtype string, blockList []string) ([]DBColumn,
 			c.OrigFKeyCol = c.FKeyCol
 		}
 
-		if dbtype == "sqlite" || dbtype == "oracle" || dbtype == "mssql" || dbtype == "snowflake" {
+		if dbtype == "sqlite" || dbtype == "oracle" || dbtype == "oracle11g" || dbtype == "mssql" || dbtype == "snowflake" {
 			c.Name = util.ToSnake(c.Name)
 			c.Table = strings.ToLower(c.Table)
 			c.Schema = strings.ToLower(c.Schema)
@@ -508,6 +512,8 @@ func DiscoverFunctions(db *sql.DB, dbtype string, blockList []string) ([]DBFunct
 		sqlStmt = sqliteFunctionsStmt
 	case "oracle":
 		sqlStmt = oracleFunctionsStmt
+	case "oracle11g":
+		sqlStmt = oracle11gFunctionsStmt
 	case "mssql":
 		sqlStmt = mssqlFunctionsStmt
 	case "snowflake":
@@ -518,7 +524,7 @@ func DiscoverFunctions(db *sql.DB, dbtype string, blockList []string) ([]DBFunct
 		// MongoDB doesn't have user-defined functions in the SQL sense
 		return nil, nil
 	default:
-		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, mssql, snowflake, mongodb", dbtype)
+		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, sqlite, oracle, oracle11g, mssql, snowflake, mongodb", dbtype)
 	}
 
 	rows, err := db.Query(sqlStmt)

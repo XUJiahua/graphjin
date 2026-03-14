@@ -38,6 +38,15 @@ var oracleInfo string
 //go:embed sql/oracle_columns.sql
 var oracleColumnsStmt string
 
+//go:embed sql/oracle11g_functions.sql
+var oracle11gFunctionsStmt string
+
+//go:embed sql/oracle11g_info.sql
+var oracle11gInfo string
+
+//go:embed sql/oracle11g_columns.sql
+var oracle11gColumnsStmt string
+
 //go:embed sql/mariadb_functions.sql
 var mariadbFunctionsStmt string
 

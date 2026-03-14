@@ -1,0 +1,187 @@
+package dialect
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+
+	"github.com/dosco/graphjin/core/v3/internal/qcode"
+	"github.com/dosco/graphjin/core/v3/internal/sdata"
+)
+
+func TestOracle11gWrapPagingOffsetOnlyDoesNotClipRows(t *testing.T) {
+	b := oracle11gSQLBuilder{
+		sel: &qcode.Select{
+			Paging: qcode.Paging{Offset: 10},
+			BCols:  []qcode.Column{{Col: sdata.DBColumn{Name: "id"}}},
+		},
+	}
+
+	got := b.wrapPaging(`SELECT "ID" FROM "USERS"`)
+
+	if strings.Contains(got, `ROWNUM <= 10`) {
+		t.Fatalf("offset-only paging should not add inner ROWNUM cap: %s", got)
+	}
+	if !strings.Contains(got, `"__GJ_RN" > 10`) {
+		t.Fatalf("offset-only paging missing outer rownum filter: %s", got)
+	}
+}
+
+func TestOracle11gWriteLiteralRejectsInvalidNumericLiteral(t *testing.T) {
+	state := &oracle11gCompileState{}
+	b := oracle11gSQLBuilder{state: state}
+
+	var buf bytes.Buffer
+	b.writeLiteral(&buf, `1 OR 1=1`, qcode.ValNum)
+
+	if state.err == nil {
+		t.Fatal("expected invalid numeric literal to set an error")
+	}
+	if got := buf.String(); got != "NULL" {
+		t.Fatalf("writeLiteral() = %q, want NULL", got)
+	}
+}
+
+func TestOracle11gWrapPagingUsesNormalizedAliasesForOrigColumns(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Paging: qcode.Paging{Offset: 5},
+			Ti:     sdata.DBTable{Name: "inventory_reports", Schema: "public"},
+			BCols: []qcode.Column{{
+				Col: sdata.DBColumn{
+					Name:     "overdue_over_180_d_qty",
+					OrigName: "OVERDUE_OVER_180D_QTY",
+				},
+			}},
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `"OVERDUE_OVER_180D_QTY" AS "OVERDUE_OVER_180_D_QTY"`) {
+		t.Fatalf("expected inner query to alias original Oracle column name, got: %s", got)
+	}
+	if !strings.Contains(got, `GJ_RN__."OVERDUE_OVER_180_D_QTY"`) {
+		t.Fatalf("expected outer offset wrapper to read normalized alias, got: %s", got)
+	}
+}
+
+func TestOracle11gWriteTableUsesOriginalSchemaAndTableNames(t *testing.T) {
+	d := &Oracle11gDialect{}
+	d.SetNameMap([]sdata.DBTable{{
+		Name:       "purchase_order",
+		OrigName:   "PurchaseOrder",
+		Schema:     "sales_ops",
+		OrigSchema: "SalesOps",
+	}})
+
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Ti: sdata.DBTable{
+				Name:   "purchase_order",
+				Schema: "sales_ops",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	b.writeTable(&buf)
+
+	if got := buf.String(); got != `"SalesOps"."PurchaseOrder"` {
+		t.Fatalf("writeTable() = %q, want %q", got, `"SalesOps"."PurchaseOrder"`)
+	}
+}
+
+func TestOracle11gCompileSelectSkipsRemoteAndDatabaseJoinChildren(t *testing.T) {
+	state := &oracle11gCompileState{
+		qc: &qcode.QCode{
+			Selects: []qcode.Select{
+				{
+					Field: qcode.Field{ID: 0, FieldName: "users"},
+					Table: "users",
+					Ti: sdata.DBTable{
+						Name:   "users",
+						Schema: "public",
+					},
+					BCols: []qcode.Column{
+						{Col: sdata.DBColumn{Name: "id"}},
+					},
+					Children: []int32{1, 2, 3},
+				},
+				{
+					Field: qcode.Field{ID: 1, FieldName: "products"},
+				},
+				{
+					Field: qcode.Field{ID: 2, FieldName: "profile", SkipRender: qcode.SkipTypeRemote},
+				},
+				{
+					Field: qcode.Field{ID: 3, FieldName: "orders", SkipRender: qcode.SkipTypeDatabaseJoin},
+				},
+			},
+		},
+		dialect: &Oracle11gDialect{},
+	}
+
+	root := &state.qc.Selects[0]
+	root.Children = []int32{1, 2, 3}
+	state.qc.Selects[1].Field.SkipRender = qcode.SkipTypeNone
+
+	q := state.compileSelect(root)
+
+	if len(q.Children) != 1 || q.Children[0] != 1 {
+		t.Fatalf("children = %v, want only local child [1]", q.Children)
+	}
+}
+
+func TestOracle11gCompileTreeSkipsDroppedRoot(t *testing.T) {
+	state := &oracle11gCompileState{
+		qc: &qcode.QCode{
+			Selects: []qcode.Select{{
+				Field: qcode.Field{
+					ID:         0,
+					FieldName:  "users",
+					SkipRender: qcode.SkipTypeDrop,
+				},
+				Table: "users",
+				Ti: sdata.DBTable{
+					Name:   "users",
+					Schema: "public",
+				},
+			}},
+		},
+		dialect: &Oracle11gDialect{},
+	}
+
+	var out []oracle11gQuery
+	state.compileTree(&state.qc.Selects[0], &out)
+
+	if len(out) != 0 {
+		t.Fatalf("compileTree() emitted %d plans for dropped root, want 0", len(out))
+	}
+}
+
+func TestOracle11gWriteOrderByPreservesNullOrdering(t *testing.T) {
+	b := oracle11gSQLBuilder{
+		sel: &qcode.Select{
+			OrderBy: []qcode.OrderBy{
+				{Col: sdata.DBColumn{Name: "price"}, Order: qcode.OrderAscNullsFirst},
+				{Col: sdata.DBColumn{Name: "created_at"}, Order: qcode.OrderDescNullsLast},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	b.writeOrderBy(&buf)
+
+	got := buf.String()
+	if !strings.Contains(got, `"PRICE" ASC NULLS FIRST`) {
+		t.Fatalf("order by missing ASC NULLS FIRST: %s", got)
+	}
+	if !strings.Contains(got, `"CREATED_AT" DESC NULLS LAST`) {
+		t.Fatalf("order by missing DESC NULLS LAST: %s", got)
+	}
+}

@@ -29,23 +29,47 @@ func (c *compilerContext) colWithTableID(table string, id int32, col string) {
 
 func (c *compilerContext) table(sel *qcode.Select, schema, table string, alias bool) {
 	if schema != "" {
-		c.quoted(schema)
+		c.quoteSchemaIdentifier(schema)
 		c.w.WriteString(`.`)
 	}
-	c.quoted(table)
+	c.quoteTableIdentifier(table)
 	if alias {
 		c.dialect.RenderTableAlias(c, table)
 	}
 }
 
 func (c *compilerContext) colWithTable(table, col string) {
-	c.quoted(table)
+	c.quoteTableIdentifier(table)
 	c.w.WriteString(`.`)
-	c.quoted(col)
+	c.quoteColumnIdentifier(table, col)
 }
 
 func (c *compilerContext) quoted(identifier string) {
 	c.w.WriteString(c.dialect.QuoteIdentifier(identifier))
+}
+
+func (c *compilerContext) quoteSchemaIdentifier(schema string) {
+	if quoter, ok := c.dialect.(dialect.ScopedIdentifierQuoter); ok {
+		c.w.WriteString(quoter.QuoteSchemaIdentifier(schema))
+		return
+	}
+	c.quoted(schema)
+}
+
+func (c *compilerContext) quoteTableIdentifier(table string) {
+	if quoter, ok := c.dialect.(dialect.ScopedIdentifierQuoter); ok {
+		c.w.WriteString(quoter.QuoteTableIdentifier(table))
+		return
+	}
+	c.quoted(table)
+}
+
+func (c *compilerContext) quoteColumnIdentifier(table, col string) {
+	if quoter, ok := c.dialect.(dialect.ScopedIdentifierQuoter); ok {
+		c.w.WriteString(quoter.QuoteColumnIdentifier(table, col))
+		return
+	}
+	c.quoted(col)
 }
 
 func (c *compilerContext) squoted(identifier string) {
@@ -76,6 +100,17 @@ func (c *compilerContext) AddParam(p dialect.Param) string {
 	}
 	c.renderParam(pp)
 	return ""
+}
+
+func (c *compilerContext) RegisterParam(p dialect.Param) string {
+	pp := Param{
+		Name:        p.Name,
+		Type:        p.Type,
+		IsArray:     p.IsArray,
+		IsNotNull:   p.IsNotNull,
+		WrapInArray: p.WrapInArray,
+	}
+	return c.registerParam(pp)
 }
 
 func (c *compilerContext) Quote(s string) {

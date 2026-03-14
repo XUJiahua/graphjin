@@ -1,7 +1,5 @@
 package dialect
 
-
-
 import (
 	"fmt"
 	"strconv"
@@ -14,6 +12,9 @@ import (
 type OracleDialect struct {
 	DBVersion       int
 	EnableCamelcase bool
+	SchemaNameMap   map[string]string
+	TableNameMap    map[string]string
+	ColumnNameMap   map[string]map[string]string
 }
 
 func (d *OracleDialect) Name() string {
@@ -22,6 +23,62 @@ func (d *OracleDialect) Name() string {
 
 func (d *OracleDialect) QuoteIdentifier(s string) string {
 	return `"` + strings.ToUpper(s) + `"`
+}
+
+func (d *OracleDialect) SetNameMap(tables []sdata.DBTable) {
+	d.SchemaNameMap = make(map[string]string)
+	d.TableNameMap = make(map[string]string)
+	d.ColumnNameMap = make(map[string]map[string]string)
+
+	for _, t := range tables {
+		addOracleScopedNameMapEntry(d.SchemaNameMap, t.Schema, t.OrigSchema)
+		addOracleScopedNameMapEntry(d.TableNameMap, t.Name, t.OrigName)
+		for _, c := range t.Columns {
+			addOracleColumnNameMapEntry(d.ColumnNameMap, t.Name, c.Name, c.OrigName)
+			addOracleScopedNameMapEntry(d.TableNameMap, c.FKeyTable, c.OrigFKeyTable)
+			addOracleScopedNameMapEntry(d.SchemaNameMap, c.FKeySchema, c.OrigFKeySchema)
+		}
+	}
+}
+
+func (d *OracleDialect) QuoteSchemaIdentifier(schema string) string {
+	if orig, ok := d.SchemaNameMap[schema]; ok {
+		return `"` + orig + `"`
+	}
+	return d.QuoteIdentifier(schema)
+}
+
+func (d *OracleDialect) QuoteTableIdentifier(table string) string {
+	if orig, ok := d.TableNameMap[table]; ok {
+		return `"` + orig + `"`
+	}
+	return d.QuoteIdentifier(table)
+}
+
+func (d *OracleDialect) QuoteColumnIdentifier(table, column string) string {
+	if cols, ok := d.ColumnNameMap[table]; ok {
+		if orig, ok := cols[column]; ok {
+			return `"` + orig + `"`
+		}
+	}
+	return d.QuoteIdentifier(column)
+}
+
+func addOracleScopedNameMapEntry(nameMap map[string]string, normalized, original string) {
+	if normalized == "" || original == "" || normalized == original {
+		return
+	}
+	nameMap[normalized] = original
+}
+
+func addOracleColumnNameMapEntry(nameMap map[string]map[string]string, table, normalized, original string) {
+	if table == "" || normalized == "" || original == "" || normalized == original {
+		return
+	}
+	if nameMap[table] == nil {
+		nameMap[table] = make(map[string]string)
+	}
+	nameMap[table][normalized] = original
 }
 
 func (d *OracleDialect) RenderLimit(ctx Context, sel *qcode.Select) {
@@ -949,7 +1006,7 @@ func (d *OracleDialect) RenderVarDeclaration(ctx Context, name, typeName string)
 	case "integer", "int4", "int8", "bigint":
 		ctx.WriteString("NUMBER")
 	case "text", "varchar":
-		ctx.WriteString("VARCHAR2(4000)") 
+		ctx.WriteString("VARCHAR2(4000)")
 	default:
 		ctx.WriteString("VARCHAR2(4000)") // Safe default? Or NUMBER?
 	}
@@ -1056,7 +1113,7 @@ func (d *OracleDialect) RenderSetSessionVar(ctx Context, name, value string) boo
 }
 
 func (d *OracleDialect) RenderArray(ctx Context, items []string) {
-	// Oracle has no direct array literal syntax simple enough for this context, 
+	// Oracle has no direct array literal syntax simple enough for this context,
 	// unless PL/SQL or type constructor.
 	// But GraphJin uses JSON mainly.
 	// Use JSON_ARRAY(...)
@@ -1092,7 +1149,7 @@ func (d *OracleDialect) getVarName(m qcode.Mutate) string {
 }
 
 func (d *OracleDialect) RenderLinearInsert(ctx Context, m *qcode.Mutate, qc *qcode.QCode, varName string, renderColVal func(qcode.MColumn)) {
-    ctx.WriteString("INSERT INTO ")
+	ctx.WriteString("INSERT INTO ")
 	ctx.ColWithTable(m.Ti.Schema, m.Ti.Name)
 	ctx.WriteString(" (")
 	i := 0
@@ -1429,7 +1486,6 @@ func (d *OracleDialect) RenderLinearDisconnect(ctx Context, m *qcode.Mutate, qc 
 	ctx.WriteString(` = NULL WHERE `)
 	renderFilter()
 }
-
 
 func (d *OracleDialect) ModifySelectsForMutation(qc *qcode.QCode) {
 	if qc.Type != qcode.QTMutation || qc.Selects == nil {

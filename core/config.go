@@ -16,10 +16,10 @@ import (
 const DefaultDBName = "default"
 
 // SupportedDBTypes lists the database types supported for single-database mode
-var SupportedDBTypes = []string{"postgres", "mysql", "mariadb", "sqlite", "oracle", "mssql", "mongodb", "snowflake"}
+var SupportedDBTypes = []string{"postgres", "mysql", "mariadb", "sqlite", "oracle", "oracle11g", "mssql", "mongodb", "snowflake"}
 
 // SupportedMultiDBTypes lists the database types supported for multi-database mode
-var SupportedMultiDBTypes = []string{"postgres", "mysql", "mariadb", "sqlite", "oracle", "mongodb", "mssql", "snowflake"}
+var SupportedMultiDBTypes = []string{"postgres", "mysql", "mariadb", "sqlite", "oracle", "oracle11g", "mongodb", "mssql", "snowflake"}
 
 // ValidateDBType checks if the given database type is supported
 func ValidateDBType(dbType string) error {
@@ -213,8 +213,8 @@ type Config struct {
 	// and 'anon' when it's not. Use the 'Roles Query' config to add more custom roles
 	Roles []Role
 
-	// Database type name Defaults to 'postgres' (options: postgres, mysql, mariadb, sqlite, oracle, mssql)
-	DBType string `mapstructure:"db_type" json:"db_type" yaml:"db_type" jsonschema:"title=Database Type,enum=postgres,enum=mysql,enum=mariadb,enum=sqlite,enum=oracle,enum=mssql,enum=snowflake"`
+	// Database type name Defaults to 'postgres' (options: postgres, mysql, mariadb, sqlite, oracle, oracle11g, mssql)
+	DBType string `mapstructure:"db_type" json:"db_type" yaml:"db_type" jsonschema:"title=Database Type,enum=postgres,enum=mysql,enum=mariadb,enum=sqlite,enum=oracle,enum=oracle11g,enum=mssql,enum=snowflake"`
 
 	// Log warnings and other debug information
 	Debug bool `jsonschema:"title=Debug,default=false"`
@@ -268,8 +268,8 @@ type Config struct {
 
 // DatabaseConfig defines configuration for a single database in multi-database mode
 type DatabaseConfig struct {
-	// Database type (postgres, mysql, mariadb, sqlite, oracle, mongodb, snowflake)
-	Type string `mapstructure:"type" json:"type" yaml:"type" jsonschema:"title=Database Type,enum=postgres,enum=mysql,enum=mariadb,enum=sqlite,enum=oracle,enum=mongodb,enum=snowflake"`
+	// Database type (postgres, mysql, mariadb, sqlite, oracle, oracle11g, mongodb, snowflake)
+	Type string `mapstructure:"type" json:"type" yaml:"type" jsonschema:"title=Database Type,enum=postgres,enum=mysql,enum=mariadb,enum=sqlite,enum=oracle,enum=oracle11g,enum=mongodb,enum=snowflake"`
 
 	// Connection string for the database (alternative to individual params)
 	ConnString string `mapstructure:"connection_string" json:"connection_string" yaml:"connection_string" jsonschema:"title=Connection String"`

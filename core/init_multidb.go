@@ -131,7 +131,7 @@ func (gj *graphjinEngine) finalizeDatabaseSchema(ctx *dbContext) error {
 				continue
 			}
 			// Oracle requires lowercase identifiers
-			if ctx.dbtype == "oracle" {
+			if ctx.dbtype == "oracle" || ctx.dbtype == "oracle11g" {
 				gj.conf.Tables[i].Schema = strings.ToLower(gj.conf.Tables[i].Schema)
 				gj.conf.Tables[i].Name = strings.ToLower(gj.conf.Tables[i].Name)
 				gj.conf.Tables[i].Table = strings.ToLower(gj.conf.Tables[i].Table)

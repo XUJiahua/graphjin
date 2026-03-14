@@ -43,7 +43,7 @@ func (c *compilerContext) renderRecursiveCTEColumnList(sel *qcode.Select) {
 		if i != 0 {
 			c.w.WriteString(`, `)
 		}
-		c.quoted(col.Col.Name)
+		c.quoteColumnIdentifier(col.Col.Table, col.Col.Name)
 	}
 }
 

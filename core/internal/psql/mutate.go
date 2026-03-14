@@ -17,7 +17,11 @@ func (co *Compiler) compileMutation(
 	w *bytes.Buffer,
 	qc *qcode.QCode,
 	md *Metadata,
-) {
+) error {
+	if co.dialect.Name() == "oracle11g" {
+		return fmt.Errorf("oracle11g does not support mutations")
+	}
+
 	c := compilerContext{
 		md:       md,
 		w:        w,
@@ -30,13 +34,13 @@ func (co *Compiler) compileMutation(
 	// This is used by MongoDB which generates JSON mutation DSL, not SQL
 	if fmc, ok := co.dialect.(dialect.FullMutationCompiler); ok {
 		if fmc.CompileFullMutation(&c, qc) {
-			return
+			return c.err
 		}
 	}
 
 	if co.dialect.SupportsLinearExecution() {
 		c.compileLinearMutation()
-		return
+		return c.err
 	}
 
 	if qc.SType != qcode.QTDelete {
@@ -58,13 +62,16 @@ func (co *Compiler) compileMutation(
 	case qcode.QTDelete:
 		c.renderDelete()
 	default:
-		return
+		return nil
 	}
 
 	co.dialect.RenderMutationPostamble(&c, qc)
 	c.w.WriteString(` `)
-	co.CompileQuery(w, qc, c.md)
+	if err := co.CompileQuery(w, qc, c.md); err != nil {
+		return err
+	}
 
+	return c.err
 }
 
 func (c *compilerContext) compileLinearMutation() {
@@ -216,10 +223,10 @@ func (c *compilerContext) compileLinearMutation() {
 						c.colWithTable(m.Ti.Name, childCol)
 						c.w.WriteString(" = ")
 
-							if dialectName == "sqlite" || dialectName == "snowflake" {
-								// SQLite uses subquery
-								c.w.WriteString("(SELECT ")
-								c.quoted(parentCol)
+						if dialectName == "sqlite" || dialectName == "snowflake" {
+							// SQLite uses subquery
+							c.w.WriteString("(SELECT ")
+							c.quoted(parentCol)
 							c.w.WriteString(" FROM ")
 							c.quoted(pm.Ti.Name)
 							c.w.WriteString(" WHERE ")
@@ -430,7 +437,7 @@ func (c *compilerContext) renderInsertUpdateColumns(m qcode.Mutate) int {
 		i++
 
 		// if !values {
-		c.quoted(col.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, col.Col.Name)
 		// 	continue
 		// }
 	}
@@ -501,13 +508,13 @@ func (c *compilerContext) renderNestedRelColumns(m qcode.Mutate, values bool, pr
 				} else {
 					c.w.WriteString(`(SELECT `)
 				}
-				c.quoted(col.VCol.Name)
+				c.quoteColumnIdentifier(col.VCol.Table, col.VCol.Name)
 				if c.dialect.Name() == "snowflake" && !c.willBeArray(i) {
 					c.w.WriteString(`) FROM `)
 				} else {
 					c.w.WriteString(` FROM `)
 				}
-				c.quoted(col.VCol.Table)
+				c.quoteTableIdentifier(col.VCol.Table)
 				c.w.WriteString(`)`)
 			} else {
 				if prefix {
@@ -517,7 +524,7 @@ func (c *compilerContext) renderNestedRelColumns(m qcode.Mutate, values bool, pr
 				}
 			}
 		} else {
-			c.quoted(col.Col.Name)
+			c.quoteColumnIdentifier(m.Ti.Name, col.Col.Name)
 		}
 	}
 }
@@ -536,7 +543,7 @@ func (c *compilerContext) renderNestedRelTables(m qcode.Mutate, prefix bool, n i
 		if d.Multi || d.Type == qcode.MTConnect || d.Type == qcode.MTDisconnect {
 			c.renderCteNameWithID(d)
 		} else {
-			c.quoted(d.Ti.Name)
+			c.quoteTableIdentifier(d.Ti.Name)
 		}
 
 		if prefix {
@@ -610,11 +617,11 @@ func (c *compilerContext) renderOneToManyConnectStmt(m qcode.Mutate) {
 	rel := m.Rel
 	if rel.Right.Col.Array {
 		c.dialect.RenderArrayAggPrefix(c, true)
-		c.quoted(rel.Left.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, rel.Left.Col.Name)
 		c.w.WriteString(`) AS `)
-		c.quoted(rel.Left.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, rel.Left.Col.Name)
 	} else {
-		c.quoted(rel.Left.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, rel.Left.Col.Name)
 	}
 
 	if m.IsJSON {
@@ -624,7 +631,7 @@ func (c *compilerContext) renderOneToManyConnectStmt(m qcode.Mutate) {
 	} else {
 		c.w.WriteString(` FROM `)
 	}
-	c.quoted(m.Ti.Name)
+	c.quoteTableIdentifier(m.Ti.Name)
 
 	c.w.WriteString(` WHERE `)
 	if c.dialect.Name() == "postgres" {
@@ -641,7 +648,7 @@ func (c *compilerContext) renderOneToOneConnectStmt(m qcode.Mutate) {
 
 	c.table(nil, m.Ti.Schema, m.Ti.Name, false)
 	c.w.WriteString(` SET `)
-	c.quoted(m.Rel.Left.Col.Name)
+	c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 	c.w.WriteString(` = `)
 	c.colWithTable(("_x_" + m.Rel.Right.Col.Table), m.Rel.Right.Col.Name)
 
@@ -672,10 +679,10 @@ func (c *compilerContext) renderOneToManyDisconnectStmt(m qcode.Mutate) {
 	rel := m.Rel
 	if rel.Left.Col.Array {
 		c.w.WriteString(`SELECT NULL AS `)
-		c.quoted(rel.Left.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, rel.Left.Col.Name)
 	} else {
 		c.w.WriteString(`SELECT `)
-		c.quoted(rel.Left.Col.Name)
+		c.quoteColumnIdentifier(m.Ti.Name, rel.Left.Col.Name)
 
 		if m.IsJSON {
 			c.w.WriteString(` FROM `)
@@ -684,7 +691,7 @@ func (c *compilerContext) renderOneToManyDisconnectStmt(m qcode.Mutate) {
 		} else {
 			c.w.WriteString(` FROM `)
 		}
-		c.quoted(m.Ti.Name)
+		c.quoteTableIdentifier(m.Ti.Name)
 
 		c.w.WriteString(` WHERE `)
 		if c.dialect.Name() == "postgres" {
@@ -707,29 +714,29 @@ func (c *compilerContext) renderOneToOneDisconnectStmt(m qcode.Mutate) {
 
 	c.table(nil, m.Ti.Schema, m.Ti.Name, false)
 	c.w.WriteString(` SET `)
-	c.quoted(m.Rel.Left.Col.Name)
+	c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 	c.w.WriteString(` = `)
 
 	if m.Rel.Left.Col.Array {
 		if c.dialect.Name() == "postgres" {
 			c.w.WriteString(` array_remove(`)
-			c.quoted(m.Rel.Left.Col.Name)
+			c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 			c.w.WriteString(`, `)
 			c.colWithTable(("_x_" + m.Rel.Right.Col.Table), m.Rel.Right.Col.Name)
 			c.w.WriteString(`)`)
 		} else if c.dialect.Name() == "mysql" || c.dialect.Name() == "mariadb" {
 			// MySQL/MariaDB use JSON_REMOVE with JSON_SEARCH
 			c.w.WriteString(` JSON_REMOVE(`)
-			c.quoted(m.Rel.Left.Col.Name)
+			c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 			c.w.WriteString(`, JSON_UNQUOTE(JSON_SEARCH(`)
-			c.quoted(m.Rel.Left.Col.Name)
+			c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 			c.w.WriteString(`, 'one', `)
 			c.colWithTable(("_x_" + m.Rel.Right.Col.Table), m.Rel.Right.Col.Name)
 			c.w.WriteString(`)))`)
 		} else if c.dialect.Name() == "oracle" {
 			// Oracle: Use JSON_TABLE to unpack, filter, and re-aggregate
 			c.w.WriteString(` (SELECT JSON_ARRAYAGG(j."VALUE") FROM JSON_TABLE(`)
-			c.quoted(m.Rel.Left.Col.Name)
+			c.quoteColumnIdentifier(m.Ti.Name, m.Rel.Left.Col.Name)
 			c.w.WriteString(`, '$[*]' COLUMNS("VALUE" NUMBER PATH '$')) j WHERE j."VALUE" != `)
 			c.colWithTable(("_x_" + m.Rel.Right.Col.Table), m.Rel.Right.Col.Name)
 			c.w.WriteString(`)`)

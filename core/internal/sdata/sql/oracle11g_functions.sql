@@ -1,0 +1,11 @@
+SELECT
+    CAST(NULL AS VARCHAR2(1)) AS "id",
+    CAST(NULL AS VARCHAR2(1)) AS "schema",
+    CAST(NULL AS VARCHAR2(1)) AS "name",
+    CAST(NULL AS VARCHAR2(1)) AS "type",
+    CAST(NULL AS NUMBER) AS "pid",
+    CAST(NULL AS VARCHAR2(1)) AS "pname",
+    CAST(NULL AS VARCHAR2(1)) AS "ptype",
+    CAST(NULL AS VARCHAR2(1)) AS "pkind"
+FROM dual
+WHERE 1 = 0

@@ -49,6 +49,10 @@ func (c *compilerContext) renderVar(vv string) {
 
 // nolint:errcheck
 func (c *compilerContext) renderParam(p Param) {
+	c.w.WriteString(c.registerParam(p))
+}
+
+func (c *compilerContext) registerParam(p Param) string {
 	var id int
 	var ok bool
 	md := c.md
@@ -68,13 +72,14 @@ func (c *compilerContext) renderParam(p Param) {
 	}
 
 	if md.poll {
-		c.quoted("_gj_sub")
-		c.w.WriteString(".")
-		c.quoted(p.Name)
-		return
+		var sb strings.Builder
+		sb.WriteString(c.dialect.QuoteIdentifier("_gj_sub"))
+		sb.WriteString(".")
+		sb.WriteString(c.dialect.QuoteIdentifier(p.Name))
+		return sb.String()
 	}
 
-	c.w.WriteString(c.dialect.BindVar(id))
+	return c.dialect.BindVar(id)
 }
 
 func (md Metadata) Params() []Param {

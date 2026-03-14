@@ -1,0 +1,5 @@
+SELECT
+    110000 AS db_version,
+    LOWER(SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')) AS db_schema,
+    SYS_CONTEXT('USERENV', 'DB_NAME') AS db_name
+FROM dual

@@ -82,6 +82,8 @@ func NewCompiler(conf Config) *Compiler {
 		d = &dialect.SQLiteDialect{}
 	case "oracle":
 		d = &dialect.OracleDialect{EnableCamelcase: conf.EnableCamelcase}
+	case "oracle11g":
+		d = &dialect.Oracle11gDialect{EnableCamelcase: conf.EnableCamelcase}
 	case "mssql":
 		d = &dialect.MSSQLDialect{
 			DBVersion:       conf.DBVersion,
@@ -134,7 +136,7 @@ func (co *Compiler) Compile(w *bytes.Buffer, qc *qcode.QCode) (Metadata, error) 
 
 	// Skip SQL comment for MongoDB (it generates JSON, not SQL) and Snowflake emulator.
 	// The current Snowflake emulator drops result rows when a leading block comment is present.
-	if co.dialect.Name() != "mongodb" && co.dialect.Name() != "snowflake" {
+	if co.dialect.Name() != "mongodb" && co.dialect.Name() != "snowflake" && co.dialect.Name() != "oracle11g" {
 		w.WriteString(`/* action='` + qc.Name + `',controller='graphql',framework='graphjin' */ `)
 	}
 
@@ -146,7 +148,7 @@ func (co *Compiler) Compile(w *bytes.Buffer, qc *qcode.QCode) (Metadata, error) 
 		err = co.CompileQuery(w, qc, &md)
 
 	case qcode.QTMutation:
-		co.compileMutation(w, qc, &md)
+		err = co.compileMutation(w, qc, &md)
 
 	default:
 		err = fmt.Errorf("unknown operation type %d", qc.Type)
