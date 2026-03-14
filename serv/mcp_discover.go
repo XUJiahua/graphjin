@@ -1156,7 +1156,7 @@ func buildProbeConnString(dbType, host string, port int, filePath, user, passwor
 			connString += "&database=" + url.QueryEscape(dbName)
 		}
 		return "sqlserver", connString
-	case "oracle":
+	case "oracle", "oracle11g":
 		if port == 0 {
 			port = 1521
 		}
@@ -1166,7 +1166,7 @@ func buildProbeConnString(dbType, host string, port int, filePath, user, passwor
 		}
 		connString := fmt.Sprintf("oracle://%s:%s@%s:%d%s",
 			user, password, host, port, dbPath)
-		return "oracle", connString
+		return driverForType(dbType), connString
 	case "sqlite":
 		return "sqlite", filePath
 	default:
@@ -1246,7 +1246,7 @@ func listDatabaseNames(db *sql.DB, dbType string) ([]string, error) {
 		query = "SELECT schema_name FROM information_schema.schemata"
 	case "mssql":
 		query = "SELECT name FROM sys.databases WHERE database_id > 4"
-	case "oracle":
+	case "oracle", "oracle11g":
 		query = "SELECT username FROM all_users WHERE oracle_maintained = 'N'"
 	case "sqlite":
 		query = "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1262,7 +1262,7 @@ func listDatabaseNames(db *sql.DB, dbType string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		// For Oracle, fall back to alternate query
-		if dbType == "oracle" {
+		if dbType == "oracle" || dbType == "oracle11g" {
 			return listOracleFallback(db)
 		}
 		return nil, err

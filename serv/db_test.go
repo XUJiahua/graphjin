@@ -215,6 +215,46 @@ func TestInitSnowflake_UsesConnectionString(t *testing.T) {
 	assert.Equal(t, conn, dc.connString)
 }
 
+func TestDetectDBTypePreservesExplicitOracle11g(t *testing.T) {
+	conf := &Config{
+		Core: core.Config{DBType: "oracle11g"},
+		Serv: Serv{
+			DB: Database{
+				Type:       "oracle11g",
+				ConnString: "oracle://user:pass@localhost:1521/XE",
+			},
+		},
+	}
+
+	detectDBType(conf)
+
+	assert.Equal(t, "oracle11g", conf.DBType)
+}
+
+func TestInitDBDriver_Oracle11gUsesWrappedDriver(t *testing.T) {
+	conf := &Config{
+		Core: core.Config{DBType: "oracle11g"},
+		Serv: Serv{
+			DB: Database{
+				Type:       "oracle11g",
+				ConnString: "oracle://user:pass@localhost:1521/XE",
+			},
+		},
+	}
+
+	dc, err := initDBDriver(conf, false, false, core.NewOsFS(""))
+	require.NoError(t, err)
+	assert.Equal(t, "oracle11g", dc.driverName)
+	assert.Equal(t, "oracle://user:pass@localhost:1521/XE", dc.connString)
+}
+
+func TestBuildProbeConnString_Oracle11g(t *testing.T) {
+	driverName, connString := buildProbeConnString("oracle11g", "localhost", 1521, "", "purchase", "purchase", "tcp", "XE")
+
+	assert.Equal(t, "oracle11g", driverName)
+	assert.Equal(t, "oracle://purchase:purchase@localhost:1521/XE", connString)
+}
+
 func TestInitDBDriver_DBTypeFallbackToDatabaseType(t *testing.T) {
 	conf := &Config{
 		Serv: Serv{

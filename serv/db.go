@@ -13,6 +13,7 @@ import (
 
 	"github.com/dosco/graphjin/core/v3"
 	"github.com/dosco/graphjin/mongodriver"
+	_ "github.com/dosco/graphjin/oracle11gdriver"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -52,24 +53,41 @@ func NewDB(conf *Config, openDB bool, log *zap.SugaredLogger, fs core.FS) (*sql.
 // detectDBType detects the database type from the connection string and updates conf.DBType
 func detectDBType(conf *Config) {
 	if cs := conf.DB.ConnString; cs != "" {
+		explicitType := strings.ToLower(strings.TrimSpace(conf.DBType))
+		if explicitType == "" {
+			explicitType = strings.ToLower(strings.TrimSpace(conf.DB.Type))
+		}
+
 		if strings.HasPrefix(cs, "postgres://") || strings.HasPrefix(cs, "postgresql://") || conf.DB.Type == "postgres" {
 			conf.DBType = "postgres"
 		}
 		if strings.HasPrefix(cs, "mysql://") {
-			conf.DBType = "mysql"
+			if explicitType == "" {
+				conf.DBType = "mysql"
+			}
 			conf.DB.ConnString = strings.TrimPrefix(cs, "mysql://")
 		}
 		if strings.HasPrefix(cs, "sqlserver://") {
-			conf.DBType = "mssql"
+			if explicitType == "" {
+				conf.DBType = "mssql"
+			}
 		}
 		if strings.HasPrefix(cs, "oracle://") {
-			conf.DBType = "oracle"
+			if explicitType == "oracle11g" {
+				conf.DBType = "oracle11g"
+			} else if explicitType == "" {
+				conf.DBType = "oracle"
+			}
 		}
 		if strings.HasPrefix(cs, "mongodb://") || strings.HasPrefix(cs, "mongodb+srv://") {
-			conf.DBType = "mongodb"
+			if explicitType == "" {
+				conf.DBType = "mongodb"
+			}
 		}
 		if strings.HasPrefix(cs, "snowflake://") {
-			conf.DBType = "snowflake"
+			if explicitType == "" {
+				conf.DBType = "snowflake"
+			}
 		}
 	}
 }
@@ -95,14 +113,14 @@ func initDBDriver(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf,
 		dc, err = initMssql(conf, openDB, useTelemetry, fs)
 	case "sqlite":
 		dc, err = initSqlite(conf, openDB, useTelemetry, fs)
-	case "oracle":
-		dc, err = initOracle(conf, openDB, useTelemetry, fs)
+	case "oracle", "oracle11g":
+		dc, err = initOracle(conf, openDB, useTelemetry, fs, conf.DBType)
 	case "mongodb":
 		dc, err = initMongo(conf, openDB, useTelemetry, fs)
 	case "snowflake":
 		dc, err = initSnowflake(conf, openDB, useTelemetry, fs)
 	default:
-		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, mssql, sqlite, oracle, mongodb, snowflake", conf.DBType)
+		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, mssql, sqlite, oracle, oracle11g, mongodb, snowflake", conf.DBType)
 	}
 
 	if err != nil {
@@ -368,7 +386,7 @@ func initSqlite(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, e
 }
 
 // initOracle initializes the oracle database
-func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, error) {
+func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS, driverName string) (*dbConf, error) {
 	var connString string
 	c := conf
 
@@ -387,7 +405,11 @@ func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, e
 		connString += "/" + c.DB.DBName
 	}
 
-	return &dbConf{driverName: "oracle", connString: connString}, nil
+	if driverName == "" {
+		driverName = "oracle"
+	}
+
+	return &dbConf{driverName: driverName, connString: connString}, nil
 }
 
 // initMongo initializes the mongodb database using the mongodriver connector

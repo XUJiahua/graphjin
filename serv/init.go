@@ -288,6 +288,8 @@ func driverForType(dbType string) string {
 		return "sqlserver"
 	case "oracle":
 		return "oracle"
+	case "oracle11g":
+		return "oracle11g"
 	case "sqlite":
 		return "sqlite"
 	case "snowflake":
