@@ -242,7 +242,7 @@ func (gj *graphjinEngine) initSub(c context.Context, sub *sub) (err error) {
 	// Only wrap subscriptions for batching if the dialect supports it
 	targetCtx := sub.s.getTargetDBCtx()
 	if len(sub.s.cs.st.md.Params()) != 0 && dialectSupportsSubscriptionBatching(targetCtx.schema.DBType()) {
-		sub.s.cs.st.sql = renderSubWrap(sub.s.cs.st, targetCtx.schema.DBType())
+		sub.s.cs.st.sql = renderSubWrap(sub.s.cs.st, targetCtx.psqlCompiler.GetDialect())
 	}
 
 	go gj.subController(sub)
@@ -714,6 +714,8 @@ func getDialectForType(ct string) dialect.Dialect {
 		return &dialect.MariaDBDialect{}
 	case "oracle":
 		return &dialect.OracleDialect{}
+	case "oracle11g":
+		return &dialect.Oracle11gDialect{}
 	case "sqlite":
 		return &dialect.SQLiteDialect{}
 	case "mssql":
@@ -733,15 +735,13 @@ func dialectSupportsSubscriptionBatching(ct string) bool {
 }
 
 // renderSubWrap function is called on the graphjin struct to render a sub wrap.
-func renderSubWrap(st stmt, ct string) string {
-	d := getDialectForType(ct)
-
+func renderSubWrap(st stmt, d dialect.Dialect) string {
 	params := make([]dialect.Param, len(st.md.Params()))
 	for i, p := range st.md.Params() {
 		params[i] = dialect.Param{Name: p.Name, Type: p.Type}
 	}
 
-	sc := &stringContext{ct: ct}
+	sc := &stringContext{d: d}
 	d.RenderSubscriptionUnbox(sc, params, st.sql)
 
 	return sc.sb.String()
@@ -749,7 +749,7 @@ func renderSubWrap(st stmt, ct string) string {
 
 type stringContext struct {
 	sb strings.Builder
-	ct string
+	d  dialect.Dialect
 }
 
 func (c *stringContext) Write(s string) (int, error) {
@@ -763,24 +763,7 @@ func (c *stringContext) AddParam(p dialect.Param) string {
 	return ""
 }
 func (c *stringContext) Quote(s string) {
-	switch c.ct {
-	case "mysql":
-		c.sb.WriteString("`")
-		c.sb.WriteString(s)
-		c.sb.WriteString("`")
-	case "oracle":
-		c.sb.WriteString(`"`)
-		c.sb.WriteString(strings.ToUpper(s))
-		c.sb.WriteString(`"`)
-	case "mssql":
-		c.sb.WriteString(`[`)
-		c.sb.WriteString(s)
-		c.sb.WriteString(`]`)
-	default:
-		c.sb.WriteString(`"`)
-		c.sb.WriteString(s)
-		c.sb.WriteString(`"`)
-	}
+	c.sb.WriteString(c.d.QuoteIdentifier(s))
 }
 func (c *stringContext) ColWithTable(table, col string) {
 	if table != "" {
