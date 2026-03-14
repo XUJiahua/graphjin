@@ -79,13 +79,13 @@ func (d *OracleDialect) RenderJSONRoot(ctx Context, sel *qcode.Select) {
 func (d *OracleDialect) RenderJSONSelect(ctx Context, sel *qcode.Select) {
 	ctx.WriteString(`SELECT JSON_OBJECT(`)
 	ctx.RenderJSONFields(sel)
-	ctx.WriteString(`) `)
+	ctx.WriteString(` RETURNING CLOB) `)
 }
 
 func (d *OracleDialect) RenderJSONPlural(ctx Context, sel *qcode.Select) {
 	ctx.WriteString(`COALESCE(JSON_ARRAYAGG(`)
 	ctx.Quote("__sj_" + strconv.Itoa(int(sel.ID)))
-	ctx.WriteString(`.json), '[]')`)
+	ctx.WriteString(`.json RETURNING CLOB), TO_CLOB('[]'))`)
 }
 
 func (d *OracleDialect) RenderJSONField(ctx Context, fieldName string, tableAlias string, colName string, isNull bool, isJSON bool) {
@@ -110,7 +110,7 @@ func (d *OracleDialect) RenderJSONField(ctx Context, fieldName string, tableAlia
 }
 
 func (d *OracleDialect) RenderRootTerminator(ctx Context) {
-	ctx.WriteString(`) AS "__ROOT" FROM DUAL`)
+	ctx.WriteString(` RETURNING CLOB) AS "__ROOT" FROM DUAL`)
 }
 
 func (d *OracleDialect) RenderBaseTable(ctx Context) {
@@ -1358,7 +1358,7 @@ func (d *OracleDialect) RenderLinearConnect(ctx Context, m *qcode.Mutate, qc *qc
 		// Array column: aggregate multiple IDs into a JSON array
 		ctx.WriteString(`JSON_ARRAYAGG(`)
 		ctx.ColWithTable(m.Ti.Name, m.Rel.Left.Col.Name)
-		ctx.WriteString(`)`)
+		ctx.WriteString(` RETURNING CLOB)`)
 	} else {
 		ctx.ColWithTable(m.Ti.Name, m.Rel.Left.Col.Name)
 	}
@@ -1404,7 +1404,7 @@ func (d *OracleDialect) RenderLinearDisconnect(ctx Context, m *qcode.Mutate, qc 
 	// Step 1: Capture the IDs being disconnected into a variable
 	ctx.WriteString(`SELECT JSON_ARRAYAGG(`)
 	ctx.ColWithTable(m.Ti.Name, m.Rel.Left.Col.Name)
-	ctx.WriteString(`) INTO `)
+	ctx.WriteString(` RETURNING CLOB) INTO `)
 	d.RenderVar(ctx, varName)
 
 	if m.IsJSON {
@@ -1626,7 +1626,7 @@ func (d *OracleDialect) RenderJSONNullCursorField(ctx Context, fieldName string)
 }
 
 func (d *OracleDialect) RenderJSONRootSuffix(ctx Context) {
-	// Oracle doesn't need any suffix
+	ctx.WriteString(` RETURNING CLOB`)
 }
 
 // Array Operations
@@ -1635,7 +1635,7 @@ func (d *OracleDialect) RenderArraySelectPrefix(ctx Context) {
 }
 
 func (d *OracleDialect) RenderArraySelectSuffix(ctx Context) {
-	ctx.WriteString(`))`)
+	ctx.WriteString(` RETURNING CLOB))`)
 }
 
 func (d *OracleDialect) RenderArrayAggPrefix(ctx Context, distinct bool) {
@@ -1648,7 +1648,7 @@ func (d *OracleDialect) RenderArrayAggPrefix(ctx Context, distinct bool) {
 
 func (d *OracleDialect) RenderArrayRemove(ctx Context, col string, val func()) {
 	// Oracle: Use JSON_TABLE to unpack, filter out the value, and re-aggregate
-	ctx.WriteString(` (SELECT JSON_ARRAYAGG(j."VALUE") FROM JSON_TABLE(`)
+	ctx.WriteString(` (SELECT JSON_ARRAYAGG(j."VALUE" RETURNING CLOB) FROM JSON_TABLE(`)
 	ctx.Quote(col)
 	ctx.WriteString(`, '$[*]' COLUMNS("VALUE" NUMBER PATH '$')) j WHERE j."VALUE" != `)
 	val()
