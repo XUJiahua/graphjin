@@ -185,6 +185,10 @@ func updateTable(conf *Config, dbInfo *sdata.DBInfo, table Table) error {
 			t1.PrimaryCol = *c1
 		}
 
+		if c.Unique {
+			c1.UniqueKey = true
+		}
+
 		if c.Array {
 			c1.Array = true
 		}

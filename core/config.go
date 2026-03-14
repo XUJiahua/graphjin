@@ -348,6 +348,7 @@ type Column struct {
 	Name       string
 	Type       string `jsonschema:"example=integer,example=text"`
 	Primary    bool
+	Unique     bool `jsonschema:"title=Unique"`
 	Array      bool
 	FullText   bool   `mapstructure:"full_text" json:"full_text" yaml:"full_text" jsonschema:"title=Full Text Search"`
 	ForeignKey string `mapstructure:"related_to" json:"related_to" yaml:"related_to" jsonschema:"title=Related To,example=other_table.id_column,example=users.id"`
