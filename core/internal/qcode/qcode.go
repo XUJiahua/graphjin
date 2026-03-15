@@ -143,6 +143,7 @@ type Field struct {
 	Type        FieldType
 	Col         sdata.DBColumn
 	Func        sdata.DBFunction
+	Name        string
 	FieldName   string
 	FieldFilter Filter
 	Args        []Arg
@@ -519,7 +520,7 @@ func (co *Compiler) compileQuery(qc *QCode, op *graph.Operation, role string) er
 		}
 
 		s1 := Select{
-			Field: Field{ID: id, ParentID: parentID, Type: FieldTypeTable},
+			Field: Field{ID: id, ParentID: parentID, Type: FieldTypeTable, Name: field.Name},
 		}
 
 		sel := &s1

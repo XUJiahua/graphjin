@@ -158,9 +158,9 @@ func TestTableDatabaseField(t *testing.T) {
 // TestCountDatabaseJoins verifies counting of cross-database joins in QCode.
 func TestCountDatabaseJoins(t *testing.T) {
 	tests := []struct {
-		name  string
-		qc    *qcode.QCode
-		want  int32
+		name string
+		qc   *qcode.QCode
+		want int32
 	}{
 		{
 			name: "no database joins",
@@ -672,6 +672,34 @@ func TestBuildChildGraphQLQuery(t *testing.T) {
 			want:     "query { orders(where: {user_id: {eq: 7}}) { id total items { name qty } } }",
 		},
 		{
+			name: "preserves aliases in fields and nested relations",
+			sel: &qcode.Select{
+				Field: qcode.Field{ID: 0, Name: "latest_audit_log", FieldName: "latest_audit_log"},
+				Table: "audit_logs",
+				Fields: []qcode.Field{
+					{Name: "action", FieldName: "event_action"},
+				},
+				Children: []int32{1},
+			},
+			selects: []qcode.Select{
+				{},
+				{
+					Field: qcode.Field{
+						Name:       "user",
+						FieldName:  "actor",
+						SkipRender: qcode.SkipTypeNone,
+					},
+					Table: "users",
+					Fields: []qcode.Field{
+						{Name: "email", FieldName: "email_address"},
+					},
+				},
+			},
+			fkCol:    "user_id",
+			parentID: []byte("7"),
+			want:     "query { audit_logs(where: {user_id: {eq: 7}}) { event_action: action actor: user { email_address: email } } }",
+		},
+		{
 			name: "skips cross-DB children",
 			sel: &qcode.Select{
 				Field: qcode.Field{ID: 0},
@@ -757,6 +785,30 @@ func TestWriteSelectFields(t *testing.T) {
 				},
 			},
 			want: "id address { street city }",
+		},
+		{
+			name: "preserves aliases",
+			sel: &qcode.Select{
+				Field: qcode.Field{ID: 0},
+				Fields: []qcode.Field{
+					{Name: "full_name", FieldName: "fullName"},
+				},
+				Children: []int32{1},
+			},
+			selects: []qcode.Select{
+				{},
+				{
+					Field: qcode.Field{
+						Name:       "user",
+						FieldName:  "actor",
+						SkipRender: qcode.SkipTypeNone,
+					},
+					Fields: []qcode.Field{
+						{Name: "email", FieldName: "emailAddress"},
+					},
+				},
+			},
+			want: "fullName: full_name actor: user { emailAddress: email }",
 		},
 		{
 			name: "skips DatabaseJoin and Remote children",
@@ -1234,6 +1286,227 @@ func TestAddForeignKeyCrossDatabase(t *testing.T) {
 	}
 	if col.FKeyCol != "id" {
 		t.Errorf("FKeyCol = %q, want %q", col.FKeyCol, "id")
+	}
+}
+
+func TestProjectCrossDatabaseTablesAllowsNestedChildFields(t *testing.T) {
+	srcCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "users", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "main",
+		},
+		{
+			Schema: "public", Table: "users", Name: "latest_audit_log_id", Type: "bigint",
+			Database: "main", FKeyDatabase: "logs", FKeySchema: "public", FKeyTable: "audit_logs", FKeyCol: "id",
+		},
+	}
+	srcDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "main", srcCols, nil, nil)
+
+	tgtCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "audit_logs", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "logs",
+		},
+		{
+			Schema: "public", Table: "audit_logs", Name: "action", Type: "text",
+			NotNull: false, Database: "logs",
+		},
+	}
+	tgtDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "logs", tgtCols, nil, nil)
+
+	gj := &graphjinEngine{}
+	allDBInfos := map[string]*sdata.DBInfo{
+		"main": srcDBInfo,
+		"logs": tgtDBInfo,
+	}
+
+	if err := gj.projectCrossDatabaseTables(srcDBInfo, "main", allDBInfos); err != nil {
+		t.Fatalf("projectCrossDatabaseTables() error: %v", err)
+	}
+
+	projected, err := srcDBInfo.GetTable("public", "audit_logs")
+	if err != nil {
+		t.Fatalf("projected table not found: %v", err)
+	}
+	if projected.Database != "logs" {
+		t.Fatalf("projected table database = %q, want %q", projected.Database, "logs")
+	}
+	if _, err := srcDBInfo.GetColumn("public", "audit_logs", "action"); err != nil {
+		t.Fatalf("projected column action not found: %v", err)
+	}
+
+	schema, err := sdata.NewDBSchema(srcDBInfo, nil)
+	if err != nil {
+		t.Fatalf("NewDBSchema() error: %v", err)
+	}
+
+	qcCompiler, err := qcode.NewCompiler(schema, qcode.Config{DBSchema: schema.DBSchema()})
+	if err != nil {
+		t.Fatalf("NewCompiler() error: %v", err)
+	}
+
+	gql := []byte(`query {
+		users {
+			latest_audit_log @object {
+				action
+			}
+		}
+	}`)
+
+	qc, err := qcCompiler.Compile(gql, nil, "user", "")
+	if err != nil {
+		t.Fatalf("Compile() error: %v", err)
+	}
+	if got := qc.Selects[1].SkipRender; got != qcode.SkipTypeDatabaseJoin {
+		t.Fatalf("child SkipRender = %v, want %v", got, qcode.SkipTypeDatabaseJoin)
+	}
+	if got := qc.Selects[1].Database; got != "logs" {
+		t.Fatalf("child Database = %q, want %q", got, "logs")
+	}
+}
+
+func TestProjectCrossDatabaseTablesSupportsNestedTargetRelationsWithDuplicateNames(t *testing.T) {
+	srcCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "users", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "main",
+		},
+		{
+			Schema: "public", Table: "users", Name: "email", Type: "text",
+			Database: "main",
+		},
+		{
+			Schema: "public", Table: "users", Name: "latest_audit_log_id", Type: "bigint",
+			Database: "main", FKeyDatabase: "logs", FKeySchema: "public", FKeyTable: "audit_logs", FKeyCol: "id",
+		},
+	}
+	srcDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "main", srcCols, nil, nil)
+	srcDBInfo.SetDatabase("main")
+
+	tgtCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "audit_logs", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "logs",
+		},
+		{
+			Schema: "public", Table: "audit_logs", Name: "action", Type: "text",
+			Database: "logs",
+		},
+		{
+			Schema: "public", Table: "audit_logs", Name: "user_id", Type: "bigint",
+			Database: "logs", FKeySchema: "public", FKeyTable: "users", FKeyCol: "id",
+		},
+		{
+			Schema: "public", Table: "users", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "logs",
+		},
+		{
+			Schema: "public", Table: "users", Name: "email", Type: "text",
+			Database: "logs",
+		},
+	}
+	tgtDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "logs", tgtCols, nil, nil)
+	tgtDBInfo.SetDatabase("logs")
+
+	gj := &graphjinEngine{}
+	allDBInfos := map[string]*sdata.DBInfo{
+		"main": srcDBInfo,
+		"logs": tgtDBInfo,
+	}
+
+	if err := gj.projectCrossDatabaseTables(srcDBInfo, "main", allDBInfos); err != nil {
+		t.Fatalf("projectCrossDatabaseTables() error: %v", err)
+	}
+
+	if _, err := srcDBInfo.GetTableForDatabase("logs", "public", "users"); err != nil {
+		t.Fatalf("projected logs.users not found: %v", err)
+	}
+
+	schema, err := sdata.NewDBSchema(srcDBInfo, nil)
+	if err != nil {
+		t.Fatalf("NewDBSchema() error: %v", err)
+	}
+
+	qcCompiler, err := qcode.NewCompiler(schema, qcode.Config{DBSchema: schema.DBSchema()})
+	if err != nil {
+		t.Fatalf("NewCompiler() error: %v", err)
+	}
+
+	gql := []byte(`query {
+		users {
+			latest_audit_log @object {
+				action
+				user {
+					email
+				}
+			}
+		}
+	}`)
+
+	qc, err := qcCompiler.Compile(gql, nil, "user", "")
+	if err != nil {
+		t.Fatalf("Compile() error: %v", err)
+	}
+
+	if got := qc.Selects[1].Database; got != "logs" {
+		t.Fatalf("cross-db child Database = %q, want %q", got, "logs")
+	}
+	if got := qc.Selects[2].Ti.Database; got != "logs" {
+		t.Fatalf("nested child Ti.Database = %q, want %q", got, "logs")
+	}
+}
+
+func TestNormalizeDatabaseJoinValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		singular bool
+		want     string
+	}{
+		{
+			name:     "non singular array preserved",
+			input:    `[{"action":"CREATE"}]`,
+			singular: false,
+			want:     `[{"action":"CREATE"}]`,
+		},
+		{
+			name:     "singular array unwraps first object",
+			input:    `[{"action":"CREATE"}]`,
+			singular: true,
+			want:     `{"action":"CREATE"}`,
+		},
+		{
+			name:     "singular empty array becomes null",
+			input:    `[]`,
+			singular: true,
+			want:     `null`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeDatabaseJoinValue([]byte(tt.input), tt.singular)
+			if string(got) != tt.want {
+				t.Fatalf("normalizeDatabaseJoinValue() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractDatabaseJoinValuePreservesNestedChildren(t *testing.T) {
+	sel := &qcode.Select{
+		Table:    "audit_logs",
+		Singular: true,
+	}
+
+	got := extractDatabaseJoinValue(
+		[]byte(`{"audit_logs":[{"action":"CREATE","user":{"email":"user1@test.com"}}]}`),
+		sel,
+	)
+
+	want := `{"action":"CREATE","user":{"email":"user1@test.com"}}`
+	if string(got) != want {
+		t.Fatalf("extractDatabaseJoinValue() = %s, want %s", got, want)
 	}
 }
 

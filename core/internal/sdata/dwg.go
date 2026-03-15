@@ -25,19 +25,51 @@ type TEdge struct {
 	name   string
 }
 
+func dbSchemaTableKey(database, schema, table string) string {
+	if database == "" {
+		return schema + ":" + table
+	}
+	return database + ":" + schema + ":" + table
+}
+
+func (s *DBSchema) getNode(database, schema, table string) (nodeInfo, bool) {
+	if database != "" {
+		if v, ok := s.tindex[dbSchemaTableKey(database, schema, table)]; ok {
+			return v, true
+		}
+		if v, ok := s.tindex[dbSchemaTableKey("", schema, table)]; ok {
+			t := s.tables[v.nodeID]
+			if t.Database == "" || t.Database == database {
+				return v, true
+			}
+		}
+		return nodeInfo{}, false
+	}
+	v, ok := s.tindex[dbSchemaTableKey("", schema, table)]
+	return v, ok
+}
+
 // addNode adds a table node to the graph
 func (s *DBSchema) addNode(t DBTable) int32 {
 	s.tables = append(s.tables, t)
 	n := s.relationshipGraph.AddNode()
 
-	s.tindex[(t.Schema + ":" + t.Name)] = nodeInfo{n}
+	s.tindex[dbSchemaTableKey(t.Database, t.Schema, t.Name)] = nodeInfo{n}
+	legacy := dbSchemaTableKey("", t.Schema, t.Name)
+	if _, ok := s.tindex[legacy]; !ok {
+		s.tindex[legacy] = nodeInfo{n}
+	}
 	return n
 }
 
 // addAliases adds table aliases to the graph
 func (s *DBSchema) addAliases(t DBTable, nodeID int32, aliases []string) {
 	for _, al := range aliases {
-		s.tindex[(t.Schema + ":" + al)] = nodeInfo{nodeID}
+		s.tindex[dbSchemaTableKey(t.Database, t.Schema, al)] = nodeInfo{nodeID}
+		legacy := dbSchemaTableKey("", t.Schema, al)
+		if _, ok := s.tindex[legacy]; !ok {
+			s.tindex[legacy] = nodeInfo{nodeID}
+		}
 		s.tableAliasIndex[al] = nodeInfo{nodeID}
 	}
 }
@@ -76,17 +108,14 @@ func (s *DBSchema) addToGraph(
 	var err error
 
 	var rt2 RelType
-	k1 := (lti.Schema + ":" + lti.Name)
-	k2 := (rti.Schema + ":" + rti.Name)
-
-	fn, ok := s.tindex[k1]
+	fn, ok := s.getNode(lti.Database, lti.Schema, lti.Name)
 	if !ok {
-		return fmt.Errorf("addEdge: unknown node: %s", k1)
+		return fmt.Errorf("addEdge: unknown node: %s", dbSchemaTableKey(lti.Database, lti.Schema, lti.Name))
 	}
 
-	tn, ok := s.tindex[k2]
+	tn, ok := s.getNode(rti.Database, rti.Schema, rti.Name)
 	if !ok {
-		return fmt.Errorf("addEdge: unknown node: %s", k2)
+		return fmt.Errorf("addEdge: unknown node: %s", dbSchemaTableKey(rti.Database, rti.Schema, rti.Name))
 	}
 
 	ln := fn.nodeID
@@ -220,7 +249,7 @@ func (s *DBSchema) Find(schema, name string) (DBTable, error) {
 		schema = s.DBSchema()
 	}
 
-	v, ok := s.tindex[(schema + ":" + name)]
+	v, ok := s.getNode("", schema, name)
 	if !ok {
 		return t, fmt.Errorf("table not found: %s.%s", schema, name)
 	}

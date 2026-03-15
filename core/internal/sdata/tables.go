@@ -26,6 +26,20 @@ type DBInfo struct {
 	hash      int
 }
 
+func dbInfoTableKey(database, schema, table string) string {
+	if database == "" {
+		return schema + ":" + table
+	}
+	return database + ":" + schema + ":" + table
+}
+
+func dbInfoColumnKey(database, schema, table, column string) string {
+	if database == "" {
+		return schema + ":" + table + ":" + column
+	}
+	return database + ":" + schema + ":" + table + ":" + column
+}
+
 // DBTable holds the database table information
 type DBTable struct {
 	Comment    string
@@ -245,12 +259,22 @@ func NewDBTable(schema, name, _type string, cols []DBColumn) DBTable {
 // AddTable adds a table to the DBInfo object
 func (di *DBInfo) AddTable(t DBTable) {
 	for i, c := range t.Columns {
-		di.colMap[(c.Schema + ":" + c.Table + ":" + c.Name)] = i
+		scoped := dbInfoColumnKey(c.Database, c.Schema, c.Table, c.Name)
+		di.colMap[scoped] = i
+		legacy := dbInfoColumnKey("", c.Schema, c.Table, c.Name)
+		if _, ok := di.colMap[legacy]; !ok {
+			di.colMap[legacy] = i
+		}
 	}
 
 	i := len(di.Tables)
 	di.Tables = append(di.Tables, t)
-	di.tableMap[(t.Schema + ":" + t.Name)] = i
+	scoped := dbInfoTableKey(t.Database, t.Schema, t.Name)
+	di.tableMap[scoped] = i
+	legacy := dbInfoTableKey("", t.Schema, t.Name)
+	if _, ok := di.tableMap[legacy]; !ok {
+		di.tableMap[legacy] = i
+	}
 }
 
 // GetTable returns a table from the DBInfo object
@@ -270,12 +294,59 @@ func (di *DBInfo) GetColumn(schema, table, column string) (*DBColumn, error) {
 
 // GetTable returns a table from the DBInfo object
 func (di *DBInfo) GetTable(schema, table string) (*DBTable, error) {
-	tid, ok := di.tableMap[(schema + ":" + table)]
+	tid, ok := di.tableMap[dbInfoTableKey("", schema, table)]
 	if !ok {
 		return nil, fmt.Errorf("table: '%s.%s' not found", schema, table)
 	}
 
 	return &di.Tables[tid], nil
+}
+
+// GetTableForDatabase returns a table using the database + schema + table identity.
+// It falls back to the legacy schema + table lookup for callers that don't scope by database.
+func (di *DBInfo) GetTableForDatabase(database, schema, table string) (*DBTable, error) {
+	if database != "" {
+		if tid, ok := di.tableMap[dbInfoTableKey(database, schema, table)]; ok {
+			return &di.Tables[tid], nil
+		}
+		if tid, ok := di.tableMap[dbInfoTableKey("", schema, table)]; ok {
+			t := &di.Tables[tid]
+			if t.Database == "" || t.Database == database {
+				return t, nil
+			}
+		}
+		return nil, fmt.Errorf("table: '%s:%s.%s' not found", database, schema, table)
+	}
+	return di.GetTable(schema, table)
+}
+
+// HasTableForDatabase reports whether the given database-scoped table exists.
+func (di *DBInfo) HasTableForDatabase(database, schema, table string) bool {
+	_, err := di.GetTableForDatabase(database, schema, table)
+	return err == nil
+}
+
+// SetDatabase tags every discovered table/column with the owning database and registers
+// database-scoped lookup keys without disturbing the legacy schema + table lookups.
+func (di *DBInfo) SetDatabase(database string) {
+	for i := range di.Tables {
+		di.Tables[i].Database = database
+		di.tableMap[dbInfoTableKey(database, di.Tables[i].Schema, di.Tables[i].Name)] = i
+
+		for j := range di.Tables[i].Columns {
+			di.Tables[i].Columns[j].Database = database
+			di.colMap[dbInfoColumnKey(database,
+				di.Tables[i].Columns[j].Schema,
+				di.Tables[i].Columns[j].Table,
+				di.Tables[i].Columns[j].Name)] = j
+		}
+
+		di.Tables[i].PrimaryCol.Database = database
+		di.Tables[i].SecondaryCol.Database = database
+		for j := range di.Tables[i].FullText {
+			di.Tables[i].FullText[j].Database = database
+		}
+	}
 }
 
 // DBColumn returns the column as a string

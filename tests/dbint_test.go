@@ -16,6 +16,7 @@ import (
 
 	"github.com/dosco/graphjin/core/v3"
 	"github.com/dosco/graphjin/mongodriver"
+	_ "github.com/dosco/graphjin/oracle11gdriver"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"github.com/testcontainers/testcontainers-go/modules/mysql"
@@ -96,6 +97,45 @@ var (
 
 func init() {
 	flag.StringVar(&dbParam, "db", "", "database type")
+}
+
+func initOracleSchema(db *sql.DB, scriptPath string) error {
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return err
+	}
+
+	plsqlRe := regexp.MustCompile(`(?m)^/\s*$`)
+	blocks := plsqlRe.Split(string(script), -1)
+
+	for _, block := range blocks {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+
+		plsqlPatterns := regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|TYPE|TRIGGER)\b|\bBEGIN\b`)
+		isPLSQL := plsqlPatterns.MatchString(block)
+
+		if isPLSQL {
+			if _, err := db.Exec(block); err != nil {
+				return fmt.Errorf("failed to init oracle schema: %w\nSQL: %s", err, block)
+			}
+			continue
+		}
+
+		for _, sqlLine := range strings.Split(block, ";") {
+			sqlLine = strings.TrimSpace(sqlLine)
+			if sqlLine == "" {
+				continue
+			}
+			if _, err := db.Exec(sqlLine); err != nil {
+				return fmt.Errorf("failed to init oracle schema: %w\nSQL: %s", err, sqlLine)
+			}
+		}
+	}
+
+	return nil
 }
 
 // setupMultiDB starts PostgreSQL, SQLite, and MongoDB in parallel for multi-DB tests
@@ -575,43 +615,83 @@ func TestMain(m *testing.M) {
 					return nil, "", fmt.Errorf("failed to ping oracle after startup: %w", pingErr)
 				}
 
-				script, err := os.ReadFile("./oracle.sql")
+				if err := initOracleSchema(db, "./oracle.sql"); err != nil {
+					return nil, "", fmt.Errorf("failed to init oracle: %w", err)
+				}
+
+				return container.Terminate, connStr, nil
+			},
+		},
+		{
+			name:   "oracle11g",
+			driver: "oracle11g",
+			startFunc: func(ctx context.Context) (func(context.Context) error, string, error) {
+				req := testcontainers.GenericContainerRequest{
+					ContainerRequest: testcontainers.ContainerRequest{
+						Image:        "oracleinanutshell/oracle-xe-11g",
+						ExposedPorts: []string{"1521/tcp"},
+						Env: map[string]string{
+							"ORACLE_ALLOW_REMOTE": "true",
+						},
+						WaitingFor: wait.ForListeningPort("1521/tcp").WithStartupTimeout(10 * time.Minute),
+					},
+					Started: true,
+				}
+				container, err := testcontainers.GenericContainer(ctx, req)
 				if err != nil {
 					return nil, "", err
 				}
 
-				// Oracle SQL files can contain PL/SQL blocks terminated by / on its own line
-				// Use regexp to split on / at end of line (with optional following whitespace/newlines)
-				plsqlRe := regexp.MustCompile(`(?m)^/\s*$`)
-				blocks := plsqlRe.Split(string(script), -1)
+				host, _ := container.Host(ctx)
+				port, _ := container.MappedPort(ctx, "1521")
 
-				for _, block := range blocks {
-					block = strings.TrimSpace(block)
-					if block == "" {
-						continue
+				adminConnStr := fmt.Sprintf("oracle://system:oracle@%s:%s/xe", host, port.Port())
+				adminDB, err := sql.Open("oracle", adminConnStr)
+				if err != nil {
+					return nil, "", err
+				}
+				defer adminDB.Close() //nolint:errcheck
+
+				var pingErr error
+				for i := 0; i < 180; i++ {
+					if pingErr = adminDB.Ping(); pingErr == nil {
+						break
 					}
-					// Check if this is a PL/SQL block
-					// Look for patterns like CREATE FUNCTION, CREATE PROCEDURE, CREATE TYPE, or BEGIN
-					// Use word boundaries to avoid matching column names like "subject_type"
-					plsqlPatterns := regexp.MustCompile(`(?i)\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE|TYPE)\b|\bBEGIN\b`)
-					isPLSQL := plsqlPatterns.MatchString(block)
-					if isPLSQL {
-						// Execute the entire block as one statement
-						if _, err := db.Exec(block); err != nil {
-							return nil, "", fmt.Errorf("failed to init oracle: %w\nSQL: %s", err, block)
-						}
-					} else {
-						// Split by ; for regular statements
-						for _, sqlLine := range strings.Split(block, ";") {
-							sqlLine = strings.TrimSpace(sqlLine)
-							if sqlLine == "" {
-								continue
-							}
-							if _, err := db.Exec(sqlLine); err != nil {
-								return nil, "", fmt.Errorf("failed to init oracle: %w\nSQL: %s", err, sqlLine)
-							}
-						}
+					time.Sleep(2 * time.Second)
+				}
+				if pingErr != nil {
+					return nil, "", fmt.Errorf("failed to ping oracle11g after startup: %w", pingErr)
+				}
+
+				for _, stmt := range []string{
+					"CREATE USER purchase IDENTIFIED BY purchase",
+					"GRANT CONNECT, RESOURCE TO purchase",
+					"GRANT UNLIMITED TABLESPACE TO purchase",
+				} {
+					if _, err := adminDB.Exec(stmt); err != nil {
+						return nil, "", fmt.Errorf("failed to prepare oracle11g user: %w\nSQL: %s", err, stmt)
 					}
+				}
+
+				connStr := fmt.Sprintf("oracle://purchase:purchase@%s:%s/xe", host, port.Port())
+				appDB, err := sql.Open("oracle", connStr)
+				if err != nil {
+					return nil, "", err
+				}
+				defer appDB.Close() //nolint:errcheck
+
+				for i := 0; i < 60; i++ {
+					if pingErr = appDB.Ping(); pingErr == nil {
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+				if pingErr != nil {
+					return nil, "", fmt.Errorf("failed to ping oracle11g app schema: %w", pingErr)
+				}
+
+				if err := initOracleSchema(appDB, "./oracle11g.sql"); err != nil {
+					return nil, "", fmt.Errorf("failed to init oracle11g: %w", err)
 				}
 
 				return container.Terminate, connStr, nil

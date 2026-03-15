@@ -152,10 +152,9 @@ func (gj *graphjinEngine) finalizeDatabaseSchema(ctx *dbContext) error {
 		}
 	}
 
-	// Tag all discovered tables with the owning database name
-	for i := range ctx.dbinfo.Tables {
-		ctx.dbinfo.Tables[i].Database = ctx.name
-	}
+	// Tag all discovered tables with the owning database name and register
+	// database-scoped lookup keys for duplicate table names across databases.
+	ctx.dbinfo.SetDatabase(ctx.name)
 
 	// Ensure conf.Tables has entries for all discovered tables in this database.
 	// Without this, groupRootsByDatabase cannot route queries/mutations to
@@ -171,6 +170,13 @@ func (gj *graphjinEngine) finalizeDatabaseSchema(ctx *dbContext) error {
 	// Process foreign keys configured for this database
 	if err := addForeignKeys(gj.conf, ctx.dbinfo, ctx.name, gj.collectDBInfos()); err != nil {
 		return fmt.Errorf("database %s: add foreign keys failed: %w", ctx.name, err)
+	}
+
+	// Project the referenced target-database tables into the local DBInfo so the
+	// local qcode compiler can validate nested child fields and same-database
+	// nested relationships before runtime handoff to the target database.
+	if err := gj.projectCrossDatabaseTables(ctx.dbinfo, ctx.name, gj.collectDBInfos()); err != nil {
+		return fmt.Errorf("database %s: project cross-database tables failed: %w", ctx.name, err)
 	}
 
 	// Process full-text search configuration for this database
@@ -385,6 +391,76 @@ func (gj *graphjinEngine) collectDBInfos() map[string]*sdata.DBInfo {
 		}
 	}
 	return m
+}
+
+// projectCrossDatabaseTables copies referenced target-database tables into the
+// local DBInfo. Runtime database join execution still uses the target database's
+// own compiler and connection; this projection exists only so the local qcode
+// compiler can validate requested child fields and same-database nested
+// relationships under those projected tables.
+func (gj *graphjinEngine) projectCrossDatabaseTables(
+	di *sdata.DBInfo,
+	sourceDB string,
+	allDBInfos map[string]*sdata.DBInfo,
+) error {
+	targetDBs := make(map[string]struct{})
+
+	for _, table := range di.Tables {
+		if table.Database != "" && table.Database != sourceDB {
+			continue
+		}
+
+		for _, col := range table.Columns {
+			if col.FKeyDatabase == "" {
+				continue
+			}
+			targetDBs[col.FKeyDatabase] = struct{}{}
+		}
+	}
+
+	for targetDB := range targetDBs {
+		targetDI, ok := allDBInfos[targetDB]
+		if !ok {
+			return fmt.Errorf("target database %s not found", targetDB)
+		}
+
+		for _, table := range targetDI.Tables {
+			if di.HasTableForDatabase(targetDB, table.Schema, table.Name) {
+				continue
+			}
+			di.AddTable(cloneProjectedCrossDBTable(table, targetDB))
+		}
+	}
+
+	return nil
+}
+
+func cloneProjectedCrossDBTable(t sdata.DBTable, targetDB string) sdata.DBTable {
+	cols := make([]sdata.DBColumn, len(t.Columns))
+	copy(cols, t.Columns)
+
+	for i := range cols {
+		cols[i].Database = targetDB
+		if cols[i].FKeyDatabase != "" {
+			cols[i].FKeyDatabase = ""
+			cols[i].FKeySchema = ""
+			cols[i].FKeyTable = ""
+			cols[i].FKeyCol = ""
+			cols[i].FKRecursive = false
+		}
+	}
+
+	out := sdata.NewDBTable(t.Schema, t.Name, t.Type, cols)
+	out.Comment = t.Comment
+	out.Database = targetDB
+	out.OrigName = t.OrigName
+	out.OrigSchema = t.OrigSchema
+	out.Blocked = t.Blocked
+	out.Func = t.Func
+	out.SecondaryCol = t.SecondaryCol
+	out.SecondaryCol.Database = targetDB
+
+	return out
 }
 
 // OptionSetDatabases sets multiple database connections for multi-database mode.

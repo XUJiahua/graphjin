@@ -59,6 +59,7 @@ func (co *Compiler) compileChildColumns(
 	for _, cid := range gf.Children {
 		field := Field{ID: id, ParentID: sel.ID, Type: FieldTypeCol}
 		f := op.Fields[cid]
+		field.Name = f.Name
 
 		name := co.ParseName(f.Name)
 
@@ -247,7 +248,7 @@ func (co *Compiler) addRelColumns(qc *QCode, sel *Select, rel sdata.DBRel) error
 		psel.addBaseCol(Column{Col: rel.Right.Col})
 
 	case sdata.RelRemote:
-		f := Field{Type: FieldTypeCol, Col: rel.Right.Col, FieldName: rel.Left.Col.Name}
+		f := Field{Type: FieldTypeCol, Col: rel.Right.Col, Name: rel.Left.Col.Name, FieldName: rel.Left.Col.Name}
 		psel.addField(f)
 		sel.SkipRender = SkipTypeRemote
 
@@ -257,7 +258,7 @@ func (co *Compiler) addRelColumns(qc *QCode, sel *Select, rel sdata.DBRel) error
 		// Use a synthetic placeholder name (__%s_db_join) so it's unique and matches
 		// what databaseJoinFieldIds() searches for during result stitching.
 		placeholderName := fmt.Sprintf("__%s_db_join", sel.FieldName)
-		f := Field{Type: FieldTypeCol, Col: rel.Right.Col, FieldName: placeholderName}
+		f := Field{Type: FieldTypeCol, Col: rel.Right.Col, Name: placeholderName, FieldName: placeholderName}
 		psel.addField(f)
 		sel.SkipRender = SkipTypeDatabaseJoin
 		sel.Database = sel.Ti.Database

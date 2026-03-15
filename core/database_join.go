@@ -121,24 +121,8 @@ func (s *gstate) resolveDatabaseJoins(
 				return
 			}
 
-			// Unwrap root JSON object: {"orders": [...]} -> [...]
-			b = jsn.Strip(b, [][]byte{[]byte(sel.Table)})
-
-			// Filter to only requested fields if specified
-			var ob bytes.Buffer
-			if len(sel.Fields) != 0 {
-				err = jsn.Filter(&ob, b, fieldsToList(sel.Fields))
-				if err != nil {
-					cerrMutex.Lock()
-					cerr = fmt.Errorf("database join %s: %w", sel.Table, err)
-					cerrMutex.Unlock()
-					return
-				}
-			} else {
-				ob.Write(b)
-			}
-
-			to[n] = jsn.Field{Key: []byte(sel.FieldName), Value: ob.Bytes()}
+			value := extractDatabaseJoinValue(b, sel)
+			to[n] = jsn.Field{Key: []byte(sel.FieldName), Value: value}
 		}(i, idVal, sel, dbCtx, p.Table)
 	}
 
@@ -232,6 +216,39 @@ func buildChildGraphQLQuery(sel *qcode.Select, selects []qcode.Select, fkColName
 	return buf.Bytes()
 }
 
+func normalizeDatabaseJoinValue(b []byte, singular bool) []byte {
+	if !singular {
+		return b
+	}
+
+	var rows []json.RawMessage
+	if err := json.Unmarshal(b, &rows); err != nil {
+		return b
+	}
+	if len(rows) == 0 {
+		return []byte("null")
+	}
+	return rows[0]
+}
+
+func extractDatabaseJoinValue(b []byte, sel *qcode.Select) []byte {
+	// The generated sub-query already selects only the requested fields/children.
+	// Re-filtering here drops nested child objects, so we only unwrap the root key.
+	b = jsn.Strip(b, [][]byte{[]byte(sel.Table)})
+	return normalizeDatabaseJoinValue(b, sel.Singular)
+}
+
+func writeQueryFieldName(buf *bytes.Buffer, actual, alias string) {
+	if actual == "" {
+		actual = alias
+	}
+	if alias != "" && alias != actual {
+		buf.WriteString(alias)
+		buf.WriteString(": ")
+	}
+	buf.WriteString(actual)
+}
+
 // writeSelectFields writes the field list for a Select, recursing into children.
 func writeSelectFields(buf *bytes.Buffer, sel *qcode.Select, selects []qcode.Select) {
 	first := true
@@ -240,7 +257,7 @@ func writeSelectFields(buf *bytes.Buffer, sel *qcode.Select, selects []qcode.Sel
 			buf.WriteString(" ")
 		}
 		first = false
-		buf.WriteString(f.FieldName)
+		writeQueryFieldName(buf, f.Name, f.FieldName)
 	}
 
 	// Recurse into child selects (nested relationships within the same target DB)
@@ -254,7 +271,7 @@ func writeSelectFields(buf *bytes.Buffer, sel *qcode.Select, selects []qcode.Sel
 			buf.WriteString(" ")
 		}
 		first = false
-		buf.WriteString(csel.FieldName)
+		writeQueryFieldName(buf, csel.Name, csel.FieldName)
 		buf.WriteString(" { ")
 		writeSelectFields(buf, csel, selects)
 		buf.WriteString(" }")

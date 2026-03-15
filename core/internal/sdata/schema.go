@@ -177,7 +177,7 @@ func (s *DBSchema) addRels(t DBTable) error {
 
 // addJsonRel adds a json relationship to the schema
 func (s *DBSchema) addJsonRel(t DBTable) error {
-	st, err := s.Find(t.SecondaryCol.Schema, t.SecondaryCol.Table)
+	st, err := s.findTableForDatabase(t.Database, t.SecondaryCol.Schema, t.SecondaryCol.Table)
 	if err != nil {
 		return err
 	}
@@ -192,7 +192,7 @@ func (s *DBSchema) addJsonRel(t DBTable) error {
 
 // addPolymorphicRel adds a polymorphic relationship to the schema
 func (s *DBSchema) addPolymorphicRel(t DBTable) error {
-	pt, err := s.Find(t.PrimaryCol.FKeySchema, t.PrimaryCol.FKeyTable)
+	pt, err := s.findTableForDatabase(t.Database, t.PrimaryCol.FKeySchema, t.PrimaryCol.FKeyTable)
 	if err != nil {
 		return err
 	}
@@ -212,7 +212,7 @@ func (s *DBSchema) addPolymorphicRel(t DBTable) error {
 
 // addRemoteRel adds a remote relationship to the schema
 func (s *DBSchema) addRemoteRel(t DBTable) error {
-	pt, err := s.Find(t.PrimaryCol.FKeySchema, t.PrimaryCol.FKeyTable)
+	pt, err := s.findTableForDatabase(t.Database, t.PrimaryCol.FKeySchema, t.PrimaryCol.FKeyTable)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,8 @@ func (s *DBSchema) addColumnRels(t DBTable) error {
 			continue
 		}
 
-		v, ok := s.tindex[(c.FKeySchema + ":" + c.FKeyTable)]
+		targetDB := t.Database
+		v, ok := s.getNode(targetDB, c.FKeySchema, c.FKeyTable)
 		if !ok {
 			return fmt.Errorf("foreign key table not found: %s.%s", c.FKeySchema, c.FKeyTable)
 		}
@@ -284,10 +285,8 @@ func (s *DBSchema) addColumnRels(t DBTable) error {
 // in the target database. This shadow node exists only for path-finding; actual SQL
 // compilation uses the target database's own schema/compiler.
 func (s *DBSchema) addCrossDatabaseRel(t DBTable, c DBColumn) error {
-	shadowKey := c.FKeySchema + ":" + c.FKeyTable
-
 	var shadowTable DBTable
-	if v, exists := s.tindex[shadowKey]; exists {
+	if v, exists := s.getNode(c.FKeyDatabase, c.FKeySchema, c.FKeyTable); exists {
 		shadowTable = s.tables[v.nodeID]
 	} else {
 		shadowTable = DBTable{
@@ -306,7 +305,20 @@ func (s *DBSchema) addCrossDatabaseRel(t DBTable, c DBColumn) error {
 		Database: c.FKeyDatabase,
 	}
 
-	return s.addToGraph(t, c, shadowTable, fc, RelOneToMany)
+	rt := RelOneToMany
+	if shadowTable.Name != "" {
+		if col, ok := shadowTable.getColumn(c.FKeyCol); ok {
+			fc = col
+			switch {
+			case c.FKRecursive:
+				rt = RelRecursive
+			case col.UniqueKey:
+				rt = RelOneToOne
+			}
+		}
+	}
+
+	return s.addToGraph(t, c, shadowTable, fc, rt)
 }
 
 // addVirtual adds a virtual table to the schema
@@ -376,9 +388,27 @@ type RelNode struct {
 	Table DBTable
 }
 
+func (s *DBSchema) findTableForDatabase(database, schema, name string) (DBTable, error) {
+	var t DBTable
+
+	if schema == "" {
+		schema = s.DBSchema()
+	}
+
+	v, ok := s.getNode(database, schema, name)
+	if !ok {
+		if database == "" {
+			return t, fmt.Errorf("table not found: %s.%s", schema, name)
+		}
+		return t, fmt.Errorf("table not found: %s:%s.%s", database, schema, name)
+	}
+
+	return s.tables[v.nodeID], nil
+}
+
 // GetFirstDegree returns the first degree relationships of a table
 func (s *DBSchema) GetFirstDegree(t DBTable) (items []RelNode, err error) {
-	currNode, ok := s.tindex[(t.Schema + ":" + t.Name)]
+	currNode, ok := s.getNode(t.Database, t.Schema, t.Name)
 	if !ok {
 		return nil, fmt.Errorf("table not found: %s", t.String())
 	}
@@ -392,7 +422,7 @@ func (s *DBSchema) GetFirstDegree(t DBTable) (items []RelNode, err error) {
 
 // GetSecondDegree returns the second degree relationships of a table
 func (s *DBSchema) GetSecondDegree(t DBTable) (items []RelNode, err error) {
-	currNode, ok := s.tindex[(t.Schema + ":" + t.Name)]
+	currNode, ok := s.getNode(t.Database, t.Schema, t.Name)
 	if !ok {
 		return nil, fmt.Errorf("table not found: %s", t.String())
 	}
