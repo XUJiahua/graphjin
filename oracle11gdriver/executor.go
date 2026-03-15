@@ -85,6 +85,9 @@ func (c *Conn) executeInstructions(ctx context.Context, query string, args []dri
 	if inst.Error != "" {
 		return nil, fmt.Errorf("oracle11gdriver: %s", inst.Error)
 	}
+	if inst.Operation == "oracle11g_mutation" {
+		return c.executeMutationInstructions(ctx, query, args)
+	}
 	if inst.Operation != "oracle11g_query" {
 		return nil, fmt.Errorf("oracle11gdriver: unsupported operation %q", inst.Operation)
 	}
@@ -602,4 +605,310 @@ func formatCursorValue(value any, valueType string) string {
 	}
 
 	return fmt.Sprintf("%v", value)
+}
+
+// ---------------------------------------------------------------------------
+// Mutation instruction types (mirror of dialect/oracle11g.go)
+// ---------------------------------------------------------------------------
+
+type mutationInstruction struct {
+	Operation    string         `json:"operation"`
+	Error        string         `json:"error,omitempty"`
+	QueryName    string         `json:"query_name,omitempty"`
+	MutationType string         `json:"mutation_type"`
+	Steps        []mutationStep `json:"steps"`
+	Queries      []queryPlan    `json:"queries,omitempty"`
+}
+
+type mutationStep struct {
+	ID             int32         `json:"id"`
+	Type           string        `json:"type"`
+	FieldName      string        `json:"field_name"`
+	Table          string        `json:"table"`
+	Schema         string        `json:"schema,omitempty"`
+	MutationSQL    string        `json:"mutation_sql"`
+	MutationParams []queryParam  `json:"mutation_params"`
+	ReturnSQL      string        `json:"return_sql"`
+	ReturnParams   []queryParam  `json:"return_params"`
+	Columns        []queryColumn `json:"columns"`
+	PKCol          string        `json:"pk_col"`
+	PKParamIndex   int           `json:"pk_param_index"`
+	Singular       bool          `json:"singular"`
+	Children       []int32       `json:"children,omitempty"`
+}
+
+// mutationStepResult holds the result of executing one mutation step.
+type mutationStepResult struct {
+	PKVal any       // captured PK value
+	Rows  []*rowData
+}
+
+// ---------------------------------------------------------------------------
+// executeMutationInstructions — main mutation execution entry point
+// ---------------------------------------------------------------------------
+
+func (c *Conn) executeMutationInstructions(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	var inst mutationInstruction
+	if err := json.Unmarshal([]byte(query), &inst); err != nil {
+		return nil, fmt.Errorf("oracle11gdriver: invalid mutation instruction: %w", err)
+	}
+	if inst.Error != "" {
+		return nil, fmt.Errorf("oracle11gdriver: %s", inst.Error)
+	}
+
+	positionalArgs := make([]any, len(args))
+	for _, arg := range args {
+		if arg.Ordinal > 0 && arg.Ordinal <= len(args) {
+			positionalArgs[arg.Ordinal-1] = arg.Value
+		}
+	}
+
+	// Begin transaction.
+	tx, err := c.BeginTx(ctx, driver.TxOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("oracle11gdriver: begin tx: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// Execute mutation steps in order (already topologically sorted by compiler).
+	stepResults := make(map[int32]*mutationStepResult)
+
+	// Build query plan maps for child queries.
+	plansByID := make(map[int32]*queryPlan, len(inst.Queries))
+	for i := range inst.Queries {
+		plan := &inst.Queries[i]
+		plansByID[plan.ID] = plan
+	}
+
+	for i := range inst.Steps {
+		step := &inst.Steps[i]
+		result, err := c.executeMutationStep(ctx, step, positionalArgs, stepResults, plansByID)
+		if err != nil {
+			return nil, fmt.Errorf("oracle11gdriver: step %d (%s %s): %w", step.ID, step.Type, step.FieldName, err)
+		}
+		stepResults[step.ID] = result
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("oracle11gdriver: commit: %w", err)
+	}
+	committed = true
+
+	// Assemble response from the first mutation step's result.
+	payload := make(map[string]any)
+	if len(inst.Steps) > 0 {
+		firstStep := &inst.Steps[0]
+		result := stepResults[firstStep.ID]
+		if result != nil && len(result.Rows) > 0 {
+			if firstStep.Singular {
+				payload[firstStep.FieldName] = result.Rows[0].Values
+			} else {
+				rows := make([]map[string]any, 0, len(result.Rows))
+				for _, row := range result.Rows {
+					rows = append(rows, row.Values)
+				}
+				payload[firstStep.FieldName] = rows
+			}
+		} else {
+			payload[firstStep.FieldName] = nil
+		}
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("oracle11gdriver: marshal mutation response: %w", err)
+	}
+
+	return NewSingleValueRows(b, []string{"__root"}), nil
+}
+
+// executeMutationStep executes a single mutation step.
+func (c *Conn) executeMutationStep(
+	ctx context.Context,
+	step *mutationStep,
+	args []any,
+	stepResults map[int32]*mutationStepResult,
+	plansByID map[int32]*queryPlan,
+) (*mutationStepResult, error) {
+	result := &mutationStepResult{}
+
+	// Resolve mutation params first (needed for all operations).
+	mutBindArgs, err := c.resolveMutationParams(step.MutationParams, args, stepResults)
+	if err != nil {
+		return nil, fmt.Errorf("resolve mutation params: %w", err)
+	}
+
+	// Capture PK value from mutation params.
+	if step.PKParamIndex < len(mutBindArgs) {
+		result.PKVal = mutBindArgs[step.PKParamIndex].Value
+	}
+
+	// For DELETE: execute return query BEFORE the delete to capture the row.
+	if step.Type == "delete" {
+		// Temporarily register this step's result so the return query can
+		// resolve step_pk params that reference this step's own PK.
+		stepResults[step.ID] = result
+
+		rows, err := c.executeMutationReturn(ctx, step, args, stepResults)
+		if err != nil {
+			return nil, fmt.Errorf("pre-delete return query: %w", err)
+		}
+		result.Rows = rows
+	}
+
+	_, err = c.execBase(ctx, step.MutationSQL, mutBindArgs)
+	if err != nil {
+		return nil, fmt.Errorf("exec %q: %w", step.MutationSQL, err)
+	}
+
+	// For non-DELETE: execute return query AFTER the mutation.
+	if step.Type != "delete" {
+		// Register step result so return query can resolve step_pk params.
+		stepResults[step.ID] = result
+
+		rows, err := c.executeMutationReturn(ctx, step, args, stepResults)
+		if err != nil {
+			return nil, fmt.Errorf("return query: %w", err)
+		}
+		result.Rows = rows
+	}
+
+	// Execute child queries for each returned row.
+	if len(step.Children) > 0 && len(result.Rows) > 0 {
+		for _, row := range result.Rows {
+			for _, childID := range step.Children {
+				child := plansByID[childID]
+				if child == nil {
+					continue
+				}
+				value, err := c.executeQueryTree(ctx, child, plansByID, args, row)
+				if err != nil {
+					return nil, fmt.Errorf("child query %d: %w", childID, err)
+				}
+				row.Values[child.FieldName] = value.Data
+				if value.HasCursor {
+					row.Values[child.FieldName+"_cursor"] = value.Cursor
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// executeMutationReturn executes the return SQL for a mutation step and returns the rows.
+func (c *Conn) executeMutationReturn(
+	ctx context.Context,
+	step *mutationStep,
+	args []any,
+	stepResults map[int32]*mutationStepResult,
+) ([]*rowData, error) {
+	if step.ReturnSQL == "" {
+		return nil, nil
+	}
+
+	returnBindArgs, err := c.resolveMutationParams(step.ReturnParams, args, stepResults)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := c.queryBase(ctx, step.ReturnSQL, returnBindArgs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	colCount := len(step.Columns)
+	if colCount == 0 {
+		colCount = len(rows.Columns())
+	}
+
+	results := make([]*rowData, 0, 4)
+	for {
+		dest := make([]driver.Value, colCount)
+		if err := rows.Next(dest); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return nil, err
+		}
+
+		row := &rowData{
+			Values: make(map[string]any),
+			Cols:   make(map[string]any),
+		}
+
+		for i := 0; i < len(step.Columns) && i < len(dest); i++ {
+			col := step.Columns[i]
+			jsonValue, bindValue := normalizeRowValue(dest[i], col.ValueType)
+			row.Cols[col.Source] = bindValue
+
+			if col.Hidden {
+				continue
+			}
+
+			fieldName := col.FieldName
+			if fieldName == "" {
+				fieldName = col.Source
+			}
+			row.Values[fieldName] = jsonValue
+		}
+
+		results = append(results, row)
+	}
+
+	return results, nil
+}
+
+// resolveMutationParams resolves mutation parameters into bind args.
+func (c *Conn) resolveMutationParams(
+	params []queryParam,
+	args []any,
+	stepResults map[int32]*mutationStepResult,
+) ([]driver.NamedValue, error) {
+	bindArgs := make([]driver.NamedValue, 0, len(params))
+	for i, param := range params {
+		value, err := resolveMutationParam(param, args, stepResults)
+		if err != nil {
+			return nil, err
+		}
+		bindArgs = append(bindArgs, driver.NamedValue{
+			Ordinal: i + 1,
+			Value:   value,
+		})
+	}
+	return bindArgs, nil
+}
+
+// resolveMutationParam resolves a single mutation param value.
+func resolveMutationParam(param queryParam, args []any, stepResults map[int32]*mutationStepResult) (any, error) {
+	switch param.Type {
+	case "arg":
+		if param.ArgIndex < 0 || param.ArgIndex >= len(args) {
+			return nil, fmt.Errorf("oracle11gdriver: missing argument %q at index %d", param.Name, param.ArgIndex)
+		}
+		return args[param.ArgIndex], nil
+
+	case "step_result":
+		sr := stepResults[param.ParentID]
+		if sr == nil {
+			return nil, nil
+		}
+		return sr.PKVal, nil
+
+	case "step_pk":
+		sr := stepResults[param.ParentID]
+		if sr == nil {
+			return nil, nil
+		}
+		return sr.PKVal, nil
+
+	default:
+		return nil, fmt.Errorf("oracle11gdriver: unsupported mutation param type %q", param.Type)
+	}
 }

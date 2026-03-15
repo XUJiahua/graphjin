@@ -86,7 +86,7 @@ func TestOracle11gCompileFullQuery(t *testing.T) {
 	}
 }
 
-func TestOracle11gCompileMutationFailsFast(t *testing.T) {
+func TestOracle11gCompileMutationDelete(t *testing.T) {
 	gql := `mutation {
 		products(delete: true, where: { id: { eq: 1 } }) {
 			id
@@ -99,12 +99,46 @@ func TestOracle11gCompileMutationFailsFast(t *testing.T) {
 	}
 
 	pc := psql.NewCompiler(psql.Config{DBType: "oracle11g"})
-	_, _, err = pc.CompileEx(qc)
-	if err == nil {
-		t.Fatal("expected oracle11g mutation compile to fail")
+	_, stmt, err := pc.CompileEx(qc)
+	if err != nil {
+		t.Fatalf("expected oracle11g mutation to compile, got error: %v", err)
 	}
-	if got := err.Error(); !strings.Contains(got, "oracle11g does not support mutations") {
-		t.Fatalf("unexpected error: %v", err)
+
+	var inst struct {
+		Operation    string `json:"operation"`
+		MutationType string `json:"mutation_type"`
+		Steps        []struct {
+			ID          int32  `json:"id"`
+			Type        string `json:"type"`
+			MutationSQL string `json:"mutation_sql"`
+			ReturnSQL   string `json:"return_sql"`
+			PKCol       string `json:"pk_col"`
+		} `json:"steps"`
+	}
+
+	if err := json.Unmarshal(stmt, &inst); err != nil {
+		t.Fatalf("invalid oracle11g mutation instruction JSON: %v\n%s", err, string(stmt))
+	}
+
+	if inst.Operation != "oracle11g_mutation" {
+		t.Fatalf("operation = %q, want oracle11g_mutation", inst.Operation)
+	}
+	if inst.MutationType != "delete" {
+		t.Fatalf("mutation_type = %q, want delete", inst.MutationType)
+	}
+	if len(inst.Steps) == 0 {
+		t.Fatal("expected at least one mutation step")
+	}
+
+	step := inst.Steps[0]
+	if step.Type != "delete" {
+		t.Fatalf("step type = %q, want delete", step.Type)
+	}
+	if !strings.Contains(step.MutationSQL, "DELETE FROM") {
+		t.Fatalf("mutation SQL missing DELETE FROM: %s", step.MutationSQL)
+	}
+	if !strings.Contains(step.ReturnSQL, "SELECT") {
+		t.Fatalf("return SQL missing SELECT: %s", step.ReturnSQL)
 	}
 }
 

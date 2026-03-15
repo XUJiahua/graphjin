@@ -18,10 +18,6 @@ func (co *Compiler) compileMutation(
 	qc *qcode.QCode,
 	md *Metadata,
 ) error {
-	if co.dialect.Name() == "oracle11g" {
-		return fmt.Errorf("oracle11g does not support mutations")
-	}
-
 	c := compilerContext{
 		md:       md,
 		w:        w,

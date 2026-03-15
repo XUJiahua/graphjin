@@ -845,3 +845,602 @@ func (b *oracle11gSQLBuilder) dbColName(col sdata.DBColumn) string {
 	}
 	return col.Name
 }
+
+// ---------------------------------------------------------------------------
+// Mutation instruction types
+// ---------------------------------------------------------------------------
+
+type oracle11gMutationInstruction struct {
+	Operation    string                  `json:"operation"`
+	Error        string                  `json:"error,omitempty"`
+	QueryName    string                  `json:"query_name,omitempty"`
+	MutationType string                  `json:"mutation_type"`
+	Steps        []oracle11gMutationStep `json:"steps"`
+	Queries      []oracle11gQuery        `json:"queries,omitempty"`
+}
+
+type oracle11gMutationStep struct {
+	ID             int32             `json:"id"`
+	Type           string            `json:"type"`
+	FieldName      string            `json:"field_name"`
+	Table          string            `json:"table"`
+	Schema         string            `json:"schema,omitempty"`
+	MutationSQL    string            `json:"mutation_sql"`
+	MutationParams []oracle11gParam  `json:"mutation_params"`
+	ReturnSQL      string            `json:"return_sql"`
+	ReturnParams   []oracle11gParam  `json:"return_params"`
+	Columns        []oracle11gColumn `json:"columns"`
+	PKCol          string            `json:"pk_col"`
+	PKParamIndex   int               `json:"pk_param_index"`
+	Singular       bool              `json:"singular"`
+	Children       []int32           `json:"children,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// CompileFullMutation — implements dialect.FullMutationCompiler
+// ---------------------------------------------------------------------------
+
+func (d *Oracle11gDialect) CompileFullMutation(ctx Context, qc *qcode.QCode) bool {
+	mutType := ""
+	switch qc.SType {
+	case qcode.QTInsert:
+		mutType = "insert"
+	case qcode.QTUpdate:
+		mutType = "update"
+	case qcode.QTDelete:
+		mutType = "delete"
+	case qcode.QTUpsert:
+		mutType = "upsert"
+	default:
+		mutType = "unknown"
+	}
+
+	inst := oracle11gMutationInstruction{
+		Operation:    "oracle11g_mutation",
+		QueryName:    qc.Name,
+		MutationType: mutType,
+	}
+
+	state := oracle11gCompileState{
+		ctx:            ctx,
+		qc:             qc,
+		dialect:        d,
+		cursorArgIndex: make(map[string]int),
+	}
+
+	// Topologically sort the mutations using DependsOn.
+	ordered := sortMutations(qc.Mutates)
+
+	// Map from mutation ID to its compiled step index for resolving step_result.
+	idToStep := make(map[int32]int, len(ordered))
+
+	for _, mid := range ordered {
+		m := qc.Mutates[mid]
+		if m.Type == qcode.MTNone || m.Type == qcode.MTKeyword {
+			continue
+		}
+
+		step := state.compileMutationStep(m, idToStep)
+		idToStep[m.ID] = len(inst.Steps)
+		inst.Steps = append(inst.Steps, step)
+	}
+
+	// Compile child queries for the return data.
+	// Walk the first root mutation's SelID to find associated selects with children.
+	if len(qc.Mutates) > 0 {
+		rootM := qc.Mutates[0]
+		if int(rootM.SelID) < len(qc.Selects) {
+			sel := &qc.Selects[rootM.SelID]
+			for _, childID := range sel.Children {
+				child := &qc.Selects[childID]
+				if child.SkipRender == qcode.SkipTypeDrop ||
+					child.SkipRender == qcode.SkipTypeRemote ||
+					child.SkipRender == qcode.SkipTypeDatabaseJoin ||
+					child.Field.SkipRender == qcode.SkipTypeDrop ||
+					child.Field.SkipRender == qcode.SkipTypeRemote ||
+					child.Field.SkipRender == qcode.SkipTypeDatabaseJoin {
+					continue
+				}
+				state.compileTree(child, &inst.Queries)
+			}
+		}
+	}
+
+	if state.err != nil {
+		inst.Error = state.err.Error()
+		inst.Steps = nil
+		inst.Queries = nil
+	}
+
+	b, err := json.Marshal(inst)
+	if err != nil {
+		fallback := oracle11gMutationInstruction{
+			Operation:    "oracle11g_mutation",
+			MutationType: mutType,
+			Error:        err.Error(),
+		}
+		b, _ = json.Marshal(fallback)
+	}
+	ctx.WriteString(string(b))
+
+	return true
+}
+
+// sortMutations performs a topological sort of mutations by DependsOn.
+func sortMutations(mutates []qcode.Mutate) []int {
+	if len(mutates) == 0 {
+		return nil
+	}
+	visited := make(map[int]bool)
+	var stack []int
+
+	var visit func(int)
+	visit = func(id int) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+		m := mutates[id]
+		for depID := range m.DependsOn {
+			if int(depID) < len(mutates) {
+				visit(int(depID))
+			}
+		}
+		stack = append(stack, id)
+	}
+
+	for i := range mutates {
+		visit(i)
+	}
+	return stack
+}
+
+// compileMutationStep compiles a single mutation into a step instruction.
+func (s *oracle11gCompileState) compileMutationStep(m qcode.Mutate, idToStep map[int32]int) oracle11gMutationStep {
+	step := oracle11gMutationStep{
+		ID:        m.ID,
+		FieldName: m.Key,
+		Table:     m.Ti.Name,
+		Schema:    m.Ti.Schema,
+		Singular:  true,
+	}
+
+	switch m.Type {
+	case qcode.MTInsert:
+		step.Type = "insert"
+	case qcode.MTUpdate:
+		step.Type = "update"
+	case qcode.MTDelete:
+		step.Type = "delete"
+	case qcode.MTUpsert:
+		step.Type = "upsert"
+	case qcode.MTConnect:
+		step.Type = "connect"
+	case qcode.MTDisconnect:
+		step.Type = "disconnect"
+	default:
+		step.Type = "unknown"
+	}
+
+	// Determine PK column name.
+	pkCol := m.Ti.PrimaryCol.Name
+	step.PKCol = pkCol
+
+	// Build mutation SQL + params.
+	switch m.Type {
+	case qcode.MTInsert:
+		s.buildInsertStep(&step, m, idToStep)
+	case qcode.MTUpdate:
+		s.buildUpdateStep(&step, m, idToStep)
+	case qcode.MTDelete:
+		s.buildDeleteStep(&step, m)
+	case qcode.MTUpsert:
+		s.buildUpsertStep(&step, m, idToStep)
+	default:
+		// Connect/Disconnect are not currently handled by oracle11g mutations.
+		s.setErr(fmt.Errorf("oracle11g mutation type %q not yet supported", step.Type))
+		return step
+	}
+
+	// Build return SQL + columns.
+	s.buildReturnQuery(&step, m)
+
+	return step
+}
+
+// buildInsertStep builds the INSERT mutation SQL for a step.
+func (s *oracle11gCompileState) buildInsertStep(step *oracle11gMutationStep, m qcode.Mutate, idToStep map[int32]int) {
+	var buf bytes.Buffer
+	buf.WriteString("INSERT INTO ")
+	s.writeFullTable(&buf, m.Ti)
+	buf.WriteString(" (")
+
+	allCols := s.allMutationCols(m)
+	bindIdx := 0
+
+	for i, col := range allCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(s.quoteCol(m.Ti, col.Name))
+	}
+
+	buf.WriteString(") VALUES (")
+
+	for i, col := range allCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		bindIdx++
+		buf.WriteString(":" + strconv.Itoa(bindIdx))
+
+		param := s.makeMutationParam(m, col, idToStep)
+		if col.Name == m.Ti.PrimaryCol.Name {
+			step.PKParamIndex = len(step.MutationParams)
+		}
+		step.MutationParams = append(step.MutationParams, param)
+	}
+
+	buf.WriteString(")")
+	step.MutationSQL = buf.String()
+}
+
+// buildUpdateStep builds the UPDATE mutation SQL for a step.
+func (s *oracle11gCompileState) buildUpdateStep(step *oracle11gMutationStep, m qcode.Mutate, idToStep map[int32]int) {
+	var buf bytes.Buffer
+	buf.WriteString("UPDATE ")
+	s.writeFullTable(&buf, m.Ti)
+	buf.WriteString(" SET ")
+
+	bindIdx := 0
+
+	// SET clause: only user-provided columns (m.Cols), not RCols or PK.
+	setCols := make([]colInfo, 0, len(m.Cols))
+	for _, mc := range m.Cols {
+		setCols = append(setCols, colInfo{Name: mc.Col.Name, FieldName: mc.FieldName, Col: mc.Col})
+	}
+
+	for i, col := range setCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(s.quoteCol(m.Ti, col.Name))
+		buf.WriteString(" = ")
+		bindIdx++
+		buf.WriteString(":" + strconv.Itoa(bindIdx))
+		step.MutationParams = append(step.MutationParams, oracle11gParam{
+			Type:      "arg",
+			Name:      col.FieldName,
+			ArgIndex:  s.argIndex,
+			ValueType: col.Col.Type,
+		})
+		s.argIndex++
+	}
+
+	// WHERE clause.
+	buf.WriteString(" WHERE ")
+
+	if int(m.SelID) < len(s.qc.Selects) && s.qc.Selects[m.SelID].Where.Exp != nil {
+		expBuilder := oracle11gSQLBuilder{
+			state:     s,
+			sel:       &s.qc.Selects[m.SelID],
+			bindIndex: bindIdx,
+		}
+		expBuilder.writeExp(&buf, s.qc.Selects[m.SelID].Where.Exp)
+		for _, p := range expBuilder.params {
+			step.MutationParams = append(step.MutationParams, p)
+		}
+		bindIdx = expBuilder.bindIndex
+	} else {
+		// Fallback: WHERE pk = :N
+		bindIdx++
+		buf.WriteString(s.quoteCol(m.Ti, m.Ti.PrimaryCol.Name))
+		buf.WriteString(" = :")
+		buf.WriteString(strconv.Itoa(bindIdx))
+		step.MutationParams = append(step.MutationParams, oracle11gParam{
+			Type:      "arg",
+			Name:      m.Ti.PrimaryCol.Name,
+			ArgIndex:  s.argIndex,
+			ValueType: m.Ti.PrimaryCol.Type,
+		})
+		s.argIndex++
+	}
+
+	// Find PK param index among mutation params.
+	step.PKParamIndex = s.findPKParamIndex(step.MutationParams, m.Ti.PrimaryCol.Name)
+
+	step.MutationSQL = buf.String()
+}
+
+// buildDeleteStep builds the DELETE mutation SQL for a step.
+func (s *oracle11gCompileState) buildDeleteStep(step *oracle11gMutationStep, m qcode.Mutate) {
+	var buf bytes.Buffer
+	buf.WriteString("DELETE FROM ")
+	s.writeFullTable(&buf, m.Ti)
+	buf.WriteString(" WHERE ")
+
+	bindIdx := 0
+
+	if int(m.SelID) < len(s.qc.Selects) && s.qc.Selects[m.SelID].Where.Exp != nil {
+		expBuilder := oracle11gSQLBuilder{
+			state:     s,
+			sel:       &s.qc.Selects[m.SelID],
+			bindIndex: bindIdx,
+		}
+		expBuilder.writeExp(&buf, s.qc.Selects[m.SelID].Where.Exp)
+		for _, p := range expBuilder.params {
+			step.MutationParams = append(step.MutationParams, p)
+		}
+	} else {
+		bindIdx++
+		buf.WriteString(s.quoteCol(m.Ti, m.Ti.PrimaryCol.Name))
+		buf.WriteString(" = :")
+		buf.WriteString(strconv.Itoa(bindIdx))
+		step.MutationParams = append(step.MutationParams, oracle11gParam{
+			Type:      "arg",
+			Name:      m.Ti.PrimaryCol.Name,
+			ArgIndex:  s.argIndex,
+			ValueType: m.Ti.PrimaryCol.Type,
+		})
+		s.argIndex++
+	}
+
+	step.PKParamIndex = s.findPKParamIndex(step.MutationParams, m.Ti.PrimaryCol.Name)
+	step.MutationSQL = buf.String()
+}
+
+// buildUpsertStep builds the MERGE INTO (upsert) SQL for a step.
+func (s *oracle11gCompileState) buildUpsertStep(step *oracle11gMutationStep, m qcode.Mutate, idToStep map[int32]int) {
+	var buf bytes.Buffer
+
+	allCols := s.allMutationCols(m)
+	pkName := m.Ti.PrimaryCol.Name
+
+	buf.WriteString("MERGE INTO ")
+	s.writeFullTable(&buf, m.Ti)
+	buf.WriteString(" t USING (SELECT ")
+
+	bindIdx := 0
+	for i, col := range allCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		bindIdx++
+		buf.WriteString(":" + strconv.Itoa(bindIdx))
+		buf.WriteString(" AS ")
+		buf.WriteString(s.quoteCol(m.Ti, col.Name))
+
+		param := s.makeMutationParam(m, col, idToStep)
+		if col.Name == pkName {
+			step.PKParamIndex = len(step.MutationParams)
+		}
+		step.MutationParams = append(step.MutationParams, param)
+	}
+
+	buf.WriteString(" FROM DUAL) s ON (t.")
+	buf.WriteString(s.quoteCol(m.Ti, pkName))
+	buf.WriteString(" = s.")
+	buf.WriteString(s.quoteCol(m.Ti, pkName))
+	buf.WriteString(")")
+
+	// WHEN MATCHED THEN UPDATE SET (non-PK columns).
+	nonPK := make([]colInfo, 0, len(allCols))
+	for _, col := range allCols {
+		if col.Name != pkName {
+			nonPK = append(nonPK, col)
+		}
+	}
+
+	if len(nonPK) > 0 {
+		buf.WriteString(" WHEN MATCHED THEN UPDATE SET ")
+		for i, col := range nonPK {
+			if i != 0 {
+				buf.WriteString(", ")
+			}
+			buf.WriteString("t.")
+			buf.WriteString(s.quoteCol(m.Ti, col.Name))
+			buf.WriteString(" = s.")
+			buf.WriteString(s.quoteCol(m.Ti, col.Name))
+		}
+	}
+
+	// WHEN NOT MATCHED THEN INSERT.
+	buf.WriteString(" WHEN NOT MATCHED THEN INSERT (")
+	for i, col := range allCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(s.quoteCol(m.Ti, col.Name))
+	}
+	buf.WriteString(") VALUES (")
+	for i, col := range allCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString("s.")
+		buf.WriteString(s.quoteCol(m.Ti, col.Name))
+	}
+	buf.WriteString(")")
+
+	step.MutationSQL = buf.String()
+}
+
+// buildReturnQuery builds the SELECT to fetch the mutated row(s).
+func (s *oracle11gCompileState) buildReturnQuery(step *oracle11gMutationStep, m qcode.Mutate) {
+	// Determine which columns to return.
+	var projections []oracle11gProjection
+	if int(m.SelID) < len(s.qc.Selects) {
+		sel := &s.qc.Selects[m.SelID]
+		builder := oracle11gSQLBuilder{
+			state: s,
+			sel:   sel,
+		}
+		builder.initProjections()
+		projections = builder.projections
+	}
+
+	// If no projections, at least return PK.
+	if len(projections) == 0 {
+		projections = []oracle11gProjection{{
+			Col:       m.Ti.PrimaryCol,
+			Source:    m.Ti.PrimaryCol.Name,
+			FieldName: m.Ti.PrimaryCol.Name,
+			ValueType: m.Ti.PrimaryCol.Type,
+		}}
+	}
+
+	var buf bytes.Buffer
+	buf.WriteString("SELECT ")
+	for i, proj := range projections {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		source := proj.Col.Name
+		if proj.Col.OrigName != "" {
+			source = proj.Col.OrigName
+		}
+		buf.WriteString(s.dialect.QuoteColumnIdentifier(m.Ti.Name, source))
+		if source != proj.Source {
+			buf.WriteString(" AS ")
+			buf.WriteString(`"` + strings.ToUpper(proj.Source) + `"`)
+		}
+	}
+	buf.WriteString(" FROM ")
+	s.writeFullTable(&buf, m.Ti)
+	buf.WriteString(" WHERE ")
+	buf.WriteString(s.quoteCol(m.Ti, m.Ti.PrimaryCol.Name))
+	buf.WriteString(" = :1")
+
+	step.ReturnSQL = buf.String()
+	step.ReturnParams = []oracle11gParam{{
+		Type:     "step_pk",
+		ParentID: m.ID,
+		Column:   m.Ti.PrimaryCol.Name,
+	}}
+
+	step.Columns = make([]oracle11gColumn, 0, len(projections))
+	for _, proj := range projections {
+		step.Columns = append(step.Columns, oracle11gColumn{
+			Source:    proj.Source,
+			FieldName: proj.FieldName,
+			ValueType: proj.ValueType,
+			Hidden:    proj.Hidden,
+		})
+	}
+
+	// Compile child select queries.
+	if int(m.SelID) < len(s.qc.Selects) {
+		sel := &s.qc.Selects[m.SelID]
+		for _, childID := range sel.Children {
+			child := &s.qc.Selects[childID]
+			if child.SkipRender == qcode.SkipTypeDrop ||
+				child.SkipRender == qcode.SkipTypeRemote ||
+				child.SkipRender == qcode.SkipTypeDatabaseJoin ||
+				child.Field.SkipRender == qcode.SkipTypeDrop ||
+				child.Field.SkipRender == qcode.SkipTypeRemote ||
+				child.Field.SkipRender == qcode.SkipTypeDatabaseJoin {
+				continue
+			}
+			step.Children = append(step.Children, childID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Mutation helper types and methods
+// ---------------------------------------------------------------------------
+
+// colInfo represents a column in the mutation context.
+type colInfo struct {
+	Name      string
+	FieldName string
+	Col       sdata.DBColumn
+	IsRCol    bool   // true if this is a relationship column
+	DepID     int32  // dependency mutation ID for relationship columns
+}
+
+// allMutationCols returns all columns for the mutation: user columns + relationship columns.
+func (s *oracle11gCompileState) allMutationCols(m qcode.Mutate) []colInfo {
+	seen := make(map[string]struct{})
+	var cols []colInfo
+
+	for _, mc := range m.Cols {
+		cols = append(cols, colInfo{Name: mc.Col.Name, FieldName: mc.FieldName, Col: mc.Col})
+		seen[mc.Col.Name] = struct{}{}
+	}
+
+	for _, rc := range m.RCols {
+		if _, ok := seen[rc.Col.Name]; ok {
+			continue
+		}
+		// Find the dependency ID for this relationship column.
+		var depID int32 = -1
+		for id := range m.DependsOn {
+			dep := s.qc.Mutates[id]
+			// Match: the RCol's VCol references the dependency table's column.
+			if dep.Ti.Name == rc.VCol.Table || dep.Ti.Name == rc.VCol.Name {
+				depID = id
+				break
+			}
+		}
+		cols = append(cols, colInfo{
+			Name:      rc.Col.Name,
+			FieldName: rc.Col.Name,
+			Col:       rc.Col,
+			IsRCol:    true,
+			DepID:     depID,
+		})
+		seen[rc.Col.Name] = struct{}{}
+	}
+
+	return cols
+}
+
+// makeMutationParam creates the appropriate param for a mutation column.
+func (s *oracle11gCompileState) makeMutationParam(m qcode.Mutate, col colInfo, idToStep map[int32]int) oracle11gParam {
+	if col.IsRCol && col.DepID >= 0 {
+		// This column's value comes from a previous step's PK.
+		return oracle11gParam{
+			Type:      "step_result",
+			ParentID:  col.DepID,
+			Column:    col.Name,
+			ValueType: col.Col.Type,
+		}
+	}
+	// Regular argument from GraphQL variables.
+	param := oracle11gParam{
+		Type:      "arg",
+		Name:      col.FieldName,
+		ArgIndex:  s.argIndex,
+		ValueType: col.Col.Type,
+	}
+	if reg, ok := s.ctx.(ParamRegisterer); ok {
+		reg.RegisterParam(Param{Name: col.FieldName, Type: col.Col.Type})
+	}
+	s.argIndex++
+	return param
+}
+
+// findPKParamIndex finds the index of the PK param in the params slice.
+func (s *oracle11gCompileState) findPKParamIndex(params []oracle11gParam, pkName string) int {
+	for i, p := range params {
+		if p.Name == pkName || p.Column == pkName {
+			return i
+		}
+	}
+	return 0
+}
+
+// writeFullTable writes the quoted SCHEMA.TABLE identifier.
+func (s *oracle11gCompileState) writeFullTable(buf *bytes.Buffer, ti sdata.DBTable) {
+	if ti.Schema != "" {
+		buf.WriteString(s.dialect.QuoteSchemaIdentifier(ti.Schema))
+		buf.WriteString(".")
+	}
+	buf.WriteString(s.dialect.QuoteTableIdentifier(ti.Name))
+}
+
+// quoteCol quotes a column identifier with table context.
+func (s *oracle11gCompileState) quoteCol(ti sdata.DBTable, col string) string {
+	return s.dialect.QuoteColumnIdentifier(ti.Name, col)
+}
