@@ -1086,7 +1086,7 @@ func (s *oracle11gCompileState) buildInsertStep(step *oracle11gMutationStep, m q
 }
 
 // buildUpdateStep builds the UPDATE mutation SQL for a step.
-func (s *oracle11gCompileState) buildUpdateStep(step *oracle11gMutationStep, m qcode.Mutate, idToStep map[int32]int) {
+func (s *oracle11gCompileState) buildUpdateStep(step *oracle11gMutationStep, m qcode.Mutate, _ map[int32]int) {
 	var buf bytes.Buffer
 	buf.WriteString("UPDATE ")
 	s.writeFullTable(&buf, m.Ti)
@@ -1397,7 +1397,7 @@ func (s *oracle11gCompileState) allMutationCols(m qcode.Mutate) []colInfo {
 }
 
 // makeMutationParam creates the appropriate param for a mutation column.
-func (s *oracle11gCompileState) makeMutationParam(m qcode.Mutate, col colInfo, idToStep map[int32]int) oracle11gParam {
+func (s *oracle11gCompileState) makeMutationParam(_ qcode.Mutate, col colInfo, _ map[int32]int) oracle11gParam {
 	if col.IsRCol && col.DepID >= 0 {
 		// This column's value comes from a previous step's PK.
 		return oracle11gParam{

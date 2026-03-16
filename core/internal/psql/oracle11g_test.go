@@ -86,6 +86,84 @@ func TestOracle11gCompileFullQuery(t *testing.T) {
 	}
 }
 
+func TestOracle11gCompileMutationInsert(t *testing.T) {
+	gql := `mutation {
+		products(insert: $data) {
+			id
+			name
+		}
+	}`
+
+	vars := map[string]json.RawMessage{
+		"data": json.RawMessage(`{
+			"id": 100,
+			"name": "Test Product",
+			"price": 19.99,
+			"owner_id": 1
+		}`),
+	}
+
+	varsJSON, err := json.Marshal(vars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v map[string]json.RawMessage
+	if err := json.Unmarshal(varsJSON, &v); err != nil {
+		t.Fatal(err)
+	}
+
+	qc, err := qcompile.Compile([]byte(gql), v, "user", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pc := psql.NewCompiler(psql.Config{DBType: "oracle11g"})
+	_, stmt, err := pc.CompileEx(qc)
+	if err != nil {
+		t.Fatalf("expected oracle11g mutation to compile, got error: %v", err)
+	}
+
+	var inst struct {
+		Operation    string `json:"operation"`
+		MutationType string `json:"mutation_type"`
+		Steps        []struct {
+			ID          int32  `json:"id"`
+			Type        string `json:"type"`
+			MutationSQL string `json:"mutation_sql"`
+			ReturnSQL   string `json:"return_sql"`
+			PKCol       string `json:"pk_col"`
+		} `json:"steps"`
+	}
+
+	if err := json.Unmarshal(stmt, &inst); err != nil {
+		t.Fatalf("invalid oracle11g mutation instruction JSON: %v\n%s", err, string(stmt))
+	}
+
+	if inst.Operation != "oracle11g_mutation" {
+		t.Fatalf("operation = %q, want oracle11g_mutation", inst.Operation)
+	}
+	if inst.MutationType != "insert" {
+		t.Fatalf("mutation_type = %q, want insert", inst.MutationType)
+	}
+	if len(inst.Steps) == 0 {
+		t.Fatal("expected at least one mutation step")
+	}
+
+	step := inst.Steps[0]
+	if step.Type != "insert" {
+		t.Fatalf("step type = %q, want insert", step.Type)
+	}
+	if !strings.Contains(step.MutationSQL, "INSERT INTO") {
+		t.Fatalf("mutation SQL missing INSERT INTO: %s", step.MutationSQL)
+	}
+	if !strings.Contains(step.MutationSQL, "VALUES") {
+		t.Fatalf("mutation SQL missing VALUES: %s", step.MutationSQL)
+	}
+	if !strings.Contains(step.ReturnSQL, "SELECT") {
+		t.Fatalf("return SQL missing SELECT: %s", step.ReturnSQL)
+	}
+}
+
 func TestOracle11gCompileMutationDelete(t *testing.T) {
 	gql := `mutation {
 		products(delete: true, where: { id: { eq: 1 } }) {

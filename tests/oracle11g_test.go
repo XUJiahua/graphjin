@@ -199,6 +199,144 @@ func TestOracle11gRemoteAPIJoin(t *testing.T) {
 	)
 }
 
+func TestOracle11gInsert(t *testing.T) {
+	requireOracle11g(t)
+
+	gql := `mutation {
+		users(insert: $data) {
+			id
+			full_name
+			email
+		}
+	}`
+
+	vars := json.RawMessage(`{
+		"data": {
+			"id": 1001,
+			"full_name": "Test User 1001",
+			"email": "test1001@test.com"
+		}
+	}`)
+
+	conf := newConfig(&core.Config{DBType: dbType, DisableAllowList: true})
+	gj, err := core.NewGraphJin(conf, db)
+	require.NoError(t, err)
+
+	res, err := gj.GraphQL(context.Background(), gql, vars, nil)
+	require.NoError(t, err)
+
+	assert.JSONEq(t,
+		`{"users":{"id":1001,"full_name":"Test User 1001","email":"test1001@test.com"}}`,
+		string(res.Data),
+	)
+
+	// Cleanup
+	_, _ = db.Exec(`DELETE FROM users WHERE id = 1001`)
+}
+
+func TestOracle11gUpdate(t *testing.T) {
+	requireOracle11g(t)
+
+	gql := `mutation {
+		products(id: $id, update: $data) {
+			id
+			name
+		}
+	}`
+
+	vars := json.RawMessage(`{
+		"id": 1,
+		"data": {
+			"name": "Updated Product 1"
+		}
+	}`)
+
+	conf := newConfig(&core.Config{DBType: dbType, DisableAllowList: true})
+	gj, err := core.NewGraphJin(conf, db)
+	require.NoError(t, err)
+
+	res, err := gj.GraphQL(context.Background(), gql, vars, nil)
+	require.NoError(t, err)
+
+	assert.JSONEq(t,
+		`{"products":{"id":1,"name":"Updated Product 1"}}`,
+		string(res.Data),
+	)
+
+	// Cleanup
+	_, _ = db.Exec(`UPDATE products SET name = 'Product 1' WHERE id = 1`)
+}
+
+func TestOracle11gDelete(t *testing.T) {
+	requireOracle11g(t)
+
+	// Setup: insert a row to delete
+	_, err := db.Exec(`INSERT INTO users (id, full_name, email) VALUES (1002, 'Delete Me', 'delete@test.com')`)
+	require.NoError(t, err)
+
+	gql := `mutation {
+		users(id: $id, delete: true) {
+			id
+			full_name
+		}
+	}`
+
+	vars := json.RawMessage(`{"id": 1002}`)
+
+	conf := newConfig(&core.Config{DBType: dbType, DisableAllowList: true})
+	gj, err := core.NewGraphJin(conf, db)
+	require.NoError(t, err)
+
+	res, err := gj.GraphQL(context.Background(), gql, vars, nil)
+	require.NoError(t, err)
+
+	assert.JSONEq(t,
+		`{"users":{"id":1002,"full_name":"Delete Me"}}`,
+		string(res.Data),
+	)
+
+	// Verify row is actually gone
+	var count int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = 1002`).Scan(&count)
+	assert.Equal(t, 0, count)
+}
+
+func TestOracle11gUpsertExisting(t *testing.T) {
+	requireOracle11g(t)
+
+	gql := `mutation {
+		products(upsert: $data) {
+			id
+			name
+			price
+		}
+	}`
+
+	vars := json.RawMessage(`{
+		"data": {
+			"id": 1,
+			"name": "Upserted Product 1",
+			"price": 999.99,
+			"owner_id": 1
+		}
+	}`)
+
+	conf := newConfig(&core.Config{DBType: dbType, DisableAllowList: true})
+	gj, err := core.NewGraphJin(conf, db)
+	require.NoError(t, err)
+
+	res, err := gj.GraphQL(context.Background(), gql, vars, nil)
+	require.NoError(t, err)
+
+	assert.JSONEq(t,
+		`{"products":{"id":1,"name":"Upserted Product 1","price":999.99}}`,
+		string(res.Data),
+	)
+
+	// Cleanup
+	_, _ = db.Exec(`UPDATE products SET name = 'Product 1', price = 11.5 WHERE id = 1`)
+}
+
 func TestOracle11gDatabaseJoin(t *testing.T) {
 	requireOracle11g(t)
 
