@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"time"
 
 	"github.com/dosco/graphjin/core/v3/internal/sdata"
@@ -54,6 +55,7 @@ func (g *GraphJin) startDBWatcher(ps time.Duration) {
 			}
 
 			latestDi, err := sdata.GetDBInfo(
+				context.Background(),
 				ctx.db,
 				ctx.dbtype,
 				gj.conf.Blocklist)
@@ -88,6 +90,8 @@ func (g *GraphJin) startDBWatcher(ps time.Duration) {
 			if pdb != nil {
 				if err := g.newGraphJin(gj.conf, pdb.db, nil, gj.fs, gj.opts...); err != nil {
 					gj.log.Println(err)
+				} else {
+					g.fireAllSchemaCallbacks()
 				}
 			}
 			g.reloadMu.Unlock()

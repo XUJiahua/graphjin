@@ -99,7 +99,12 @@ func (d *OracleDialect) RenderLimit(ctx Context, sel *qcode.Select) {
 			sel.Paging.Offset != 0
 		if needsOrderBy && sel.Ti.PrimaryCol.Name != "" {
 			ctx.WriteString(` ORDER BY `)
-			ctx.ColWithTable(sel.Ti.Name, sel.Ti.PrimaryCol.Name)
+			for j, pkCol := range sel.Ti.PrimaryCols {
+				if j > 0 {
+					ctx.WriteString(`, `)
+				}
+				ctx.ColWithTable(sel.Ti.Name, pkCol.Name)
+			}
 		}
 	}
 
@@ -281,7 +286,7 @@ func (d *OracleDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 			ctx.WriteString(` CASE WHEN `)
 			ctx.AddParam(Param{Name: ob.KeyVar, Type: "text"})
 			ctx.WriteString(` = '`)
-			ctx.WriteString(ob.Key)
+			ctx.WriteString(strings.ReplaceAll(ob.Key, "'", "''"))
 			ctx.WriteString(`' THEN `)
 		}
 		if ob.Var != "" {
@@ -290,7 +295,14 @@ func (d *OracleDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 			ctx.WriteString(strings.ToUpper(ob.Col.Name))
 			ctx.WriteString(`"."ORD"`)
 		} else {
+			if ob.IsFunc {
+				ctx.WriteString(strings.ToUpper(ob.Func.Name))
+				ctx.WriteString(`(`)
+			}
 			ctx.ColWithTable(ob.Col.Table, ob.Col.Name)
+			if ob.IsFunc {
+				ctx.WriteString(`)`)
+			}
 		}
 		if ob.KeyVar != "" && ob.Key != "" {
 			ctx.WriteString(` END `)
@@ -1050,7 +1062,7 @@ func (d *OracleDialect) RenderMutateToRecordSet(ctx Context, m *qcode.Mutate, n 
 	i := 0
 	hasPK := false
 	for _, col := range m.Cols {
-		if col.FieldName == m.Ti.PrimaryCol.Name {
+		if m.Ti.IsPKCol(col.FieldName) {
 			hasPK = true
 		}
 		if i != 0 {
@@ -1090,13 +1102,16 @@ func (d *OracleDialect) RenderMutateToRecordSet(ctx Context, m *qcode.Mutate, n 
 	}
 
 	if !hasPK {
-		if i != 0 {
-			ctx.WriteString(`, `)
+		for _, pkCol := range m.Ti.PrimaryCols {
+			if i != 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` NUMBER PATH '$.`)
+			ctx.WriteString(pkCol.Name)
+			ctx.WriteString(`'`)
+			i++
 		}
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` NUMBER PATH '$.`)
-		ctx.WriteString(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(`'`)
 	}
 
 	ctx.WriteString(`))) `)
@@ -1183,7 +1198,7 @@ func (d *OracleDialect) RenderLinearInsert(ctx Context, m *qcode.Mutate, qc *qco
 			ctx.WriteString(", ")
 		}
 		renderColVal(col)
-		if col.Col.Name == m.Ti.PrimaryCol.Name {
+		if m.Ti.IsPKCol(col.Col.Name) {
 			hasExplicitPK = true
 			pkFieldName = col.FieldName
 		}
@@ -1237,7 +1252,12 @@ func (d *OracleDialect) RenderLinearInsert(ctx Context, m *qcode.Mutate, qc *qco
 		// Works for both explicit and auto-generated PKs
 		if m.Type == qcode.MTInsert {
 			ctx.WriteString(` RETURNING `)
-			ctx.Quote(m.Ti.PrimaryCol.Name)
+			for j, pkCol := range m.Ti.PrimaryCols {
+				if j > 0 {
+					ctx.WriteString(`, `)
+				}
+				ctx.Quote(pkCol.Name)
+			}
 			ctx.WriteString(` INTO v_`)
 			ctx.WriteString(varName)
 		}
@@ -1330,9 +1350,14 @@ func (d *OracleDialect) RenderLinearUpdate(ctx Context, m *qcode.Mutate, qc *qco
 
 	// Identity fallback if no columns to update
 	if i == 0 {
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` = `)
-		ctx.Quote(m.Ti.PrimaryCol.Name)
+		for j, pkCol := range m.Ti.PrimaryCols {
+			if j > 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` = `)
+			ctx.Quote(pkCol.Name)
+		}
 	}
 
 	ctx.WriteString(` WHERE `)
@@ -1399,9 +1424,14 @@ func (d *OracleDialect) renderChildUpdate(ctx Context, m *qcode.Mutate, qc *qcod
 	}
 
 	if i == 0 {
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` = `)
-		ctx.Quote(m.Ti.PrimaryCol.Name)
+		for j, pkCol := range m.Ti.PrimaryCols {
+			if j > 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` = `)
+			ctx.Quote(pkCol.Name)
+		}
 	}
 
 	ctx.WriteString(` WHERE `)
@@ -1529,7 +1559,7 @@ func (d *OracleDialect) ModifySelectsForMutation(qc *qcode.QCode) {
 			hasExplicitPK := false
 			var pkName string
 			for _, col := range m.Cols {
-				if col.Col.Name == m.Ti.PrimaryCol.Name {
+				if m.Ti.IsPKCol(col.Col.Name) {
 					hasExplicitPK = true
 					pkName = col.FieldName
 					break

@@ -136,12 +136,7 @@ func (ms *mcpServer) handleExecuteGraphQL(ctx context.Context, req mcp.CallToolR
 			result.Errors = append(result.Errors, ErrorInfo{Message: enhanceError(e.Message, "execute_graphql")})
 		}
 	}
-
-	data, err := mcpMarshalJSON(result, true)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
+	return ms.toolResultJSON("execute_graphql", args, result)
 }
 
 // handleExecuteSavedQuery executes a saved query by name
@@ -191,12 +186,40 @@ func (ms *mcpServer) handleExecuteSavedQuery(ctx context.Context, req mcp.CallTo
 			result.Errors = append(result.Errors, ErrorInfo{Message: enhanceError(e.Message, "execute_saved_query")})
 		}
 	}
+	return ms.toolResultJSON("execute_saved_query", args, result)
+}
 
-	data, err := mcpMarshalJSON(result, true)
+// handleExecuteWorkflow executes a named JS workflow from ./workflows.
+func (ms *mcpServer) handleExecuteWorkflow(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.GetArguments()
+	name, _ := args["name"].(string)
+	namespace, _ := args["namespace"].(string)
+
+	if name == "" {
+		return mcp.NewToolResultError("workflow name is required"), nil
+	}
+
+	input := map[string]any{}
+	if vars, ok := args["variables"].(map[string]any); ok {
+		input = vars
+	}
+
+	ns := namespace
+	if ns == "" {
+		ns = ms.getNamespace()
+	}
+
+	var nsPtr *string
+	if ns != "" {
+		nsPtr = &ns
+	}
+
+	out, err := ms.service.runNamedWorkflow(ctx, name, input, nsPtr)
 	if err != nil {
 		return mcp.NewToolResultError(err.Error()), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+
+	return ms.toolResultJSON("execute_workflow", args, map[string]any{"data": out})
 }
 
 // handleExecuteWorkflow executes a named JS workflow from ./workflows.

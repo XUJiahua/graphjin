@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -51,8 +52,11 @@ func SchemaDiff(db *sql.DB, dbType string, schemaBytes []byte, blocklist []strin
 		blocklist,
 	)
 
+	// Attach clustering keys from schema DDL to expected tables
+	attachClusteringKeys(expected, ds.ClusteringKeys, schema, dbType)
+
 	// Get current database schema
-	current, err := sdata.GetDBInfo(db, dbType, blocklist)
+	current, err := sdata.GetDBInfo(context.Background(), db, dbType, blocklist)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover database schema: %w", err)
 	}
@@ -317,6 +321,24 @@ func computeDiff(current, expected *sdata.DBInfo, opts DiffOptions) []SchemaOper
 		}
 	}
 
+	// Detect clustering key changes on existing tables
+	for _, expTable := range expected.Tables {
+		currTable, exists := currentTables[expTable.Name]
+		if !exists {
+			continue
+		}
+		if !clusteringKeysEqual(currTable.ClusteringKeys, expTable.ClusteringKeys) {
+			sql := dialect.AlterClusteringKey(expTable.Name, expTable.ClusteringKeys)
+			if sql != "" {
+				ops = append(ops, SchemaOperation{
+					Type:  "alter_clustering_key",
+					Table: expTable.Name,
+					SQL:   sql,
+				})
+			}
+		}
+	}
+
 	// Find tables to drop (destructive)
 	if opts.Destructive {
 		for tableName := range currentTables {
@@ -427,8 +449,11 @@ func SchemaDiffMultiDB(
 		// Create expected DBInfo for this database
 		expected := sdata.NewDBInfo(dbType, ds.Version, schema, "", cols, nil, blocklist)
 
+		// Attach clustering keys for tables in this database
+		attachClusteringKeys(expected, ds.ClusteringKeys, schema, dbType)
+
 		// Get current database schema
-		current, err := sdata.GetDBInfo(dbConn, dbType, blocklist)
+		current, err := sdata.GetDBInfo(context.Background(), dbConn, dbType, blocklist)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get schema for %s: %w", dbName, err)
 		}
@@ -441,4 +466,29 @@ func SchemaDiffMultiDB(
 	}
 
 	return results, nil
+}
+
+func clusteringKeysEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// attachClusteringKeys assigns parsed @cluster directive data to the matching DBTable entries.
+func attachClusteringKeys(di *sdata.DBInfo, clusters []qcode.TableCluster, defaultSchema, dbType string) {
+	for _, ck := range clusters {
+		schema := ck.Schema
+		if schema == "" {
+			schema = defaultSchema
+		}
+		if t, err := di.GetTable(schema, ck.Table); err == nil {
+			t.ClusteringKeys = ck.Keys
+		}
+	}
 }

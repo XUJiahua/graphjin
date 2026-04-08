@@ -68,6 +68,18 @@ var mssqlColumnsStmt string
 //go:embed sql/mssql_view_pks.sql
 var mssqlViewPKsStmt string
 
+//go:embed sql/mssql_has_views.sql
+var mssqlHasViewsStmt string
+
+//go:embed sql/postgres_view_pks.sql
+var postgresViewPKsStmt string
+
+//go:embed sql/oracle_view_pks.sql
+var oracleViewPKsStmt string
+
+//go:embed sql/mysql_view_pks.sql
+var mysqlViewPKsStmt string
+
 //go:embed sql/snowflake_functions.sql
 var snowflakeFunctionsStmt string
 
@@ -76,6 +88,13 @@ var snowflakeInfo string
 
 //go:embed sql/snowflake_columns.sql
 var snowflakeColumnsStmt string
+
+//go:embed sql/snowflake_columns_no_overrides.sql
+var snowflakeColumnsNoOverridesStmt string
+
+//go:embed sql/snowflake_clustering.sql
+var snowflakeClusteringStmt string
+
 
 //go:embed sql/mongodb_info.json
 var mongodbInfo string

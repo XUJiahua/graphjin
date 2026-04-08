@@ -140,14 +140,20 @@ func (d *PostgresDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 			ctx.WriteString(` CASE WHEN `)
 			ctx.AddParam(Param{Name: ob.KeyVar, Type: "text"})
 			ctx.WriteString(` = `)
-			// ctx.squoted(ob.Key) // TODO: How to quote value?
-			ctx.WriteString(fmt.Sprintf("'%s'", ob.Key)) // Simple quote for now, careful with injections but these are keys
+			ctx.WriteString(fmt.Sprintf("'%s'", strings.ReplaceAll(ob.Key, "'", "''")))
 			ctx.WriteString(` THEN `)
 		}
 		if ob.Var != "" {
 			ctx.ColWithTable(`_gj_ob_`+ob.Col.Name, "ord")
 		} else {
+			if ob.IsFunc {
+				ctx.WriteString(strings.ToUpper(ob.Func.Name))
+				ctx.WriteString(`(`)
+			}
 			ctx.ColWithTable(ob.Col.Table, ob.Col.Name)
+			if ob.IsFunc {
+				ctx.WriteString(`)`)
+			}
 		}
 		if ob.KeyVar != "" && ob.Key != "" {
 			ctx.WriteString(` END `)
@@ -172,6 +178,12 @@ func (d *PostgresDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 
 func (d *PostgresDialect) RenderDistinctOn(ctx Context, sel *qcode.Select) {
 	if len(sel.DistinctOn) == 0 {
+		return
+	}
+	// Skip DISTINCT ON when GROUP BY is active — GROUP BY already handles
+	// grouping, and DISTINCT ON conflicts with ORDER BY on aggregation columns
+	// (PostgreSQL requires DISTINCT ON columns to match initial ORDER BY).
+	if sel.GroupCols {
 		return
 	}
 	ctx.WriteString(`DISTINCT ON (`)
@@ -556,7 +568,7 @@ func (d *PostgresDialect) renderGeoGeometry(ctx Context, geo *qcode.GeoExp) {
 			}
 		}
 		ctx.WriteString(fmt.Sprintf(`ST_SetSRID(ST_GeomFromGeoJSON('%s'), %d)`,
-			string(geo.GeoJSON), geo.SRID))
+			strings.ReplaceAll(string(geo.GeoJSON), "'", "''"), geo.SRID))
 	}
 }
 
@@ -690,10 +702,13 @@ func (d *PostgresDialect) RenderUpsert(ctx Context, m *qcode.Mutate, insert func
 		i++
 	}
 	// Fallback to primary key if no unique keys found in cols
-	// This mirrors psql/mutate.go behavior
-	// But we need access to Ti.PrimaryCol
 	if i == 0 {
-		ctx.WriteString(m.Ti.PrimaryCol.Name)
+		for j, pkCol := range m.Ti.PrimaryCols {
+			if j > 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.WriteString(pkCol.Name)
+		}
 	}
 	ctx.WriteString(`) DO UPDATE SET `)
 	updateSet()

@@ -130,7 +130,7 @@ type Serv struct {
 // Database configuration
 type Database struct {
 	ConnString string `mapstructure:"connection_string" jsonschema:"title=Connection String"`
-	Type       string `jsonschema:"title=Type,enum=postgres,enum=mysql,enum=mariadb,enum=mssql,enum=sqlite,enum=oracle,enum=oracle11g,enum=mongodb,enum=snowflake"`
+	Type       string `jsonschema:"title=Type,enum=postgres,enum=mysql,enum=mariadb,enum=mssql,enum=sqlite,enum=oracle,enum=mongodb,enum=snowflake"`
 	Host       string `jsonschema:"title=Host"`
 	Port       uint16 `jsonschema:"title=Port"`
 	DBName     string `jsonschema:"title=Database Name"`
@@ -177,6 +177,12 @@ type Database struct {
 
 	// MSSQL: trust server certificate without validation
 	TrustServerCertificate *bool `mapstructure:"trust_server_certificate" jsonschema:"title=MSSQL Trust Server Certificate"`
+
+	// Snowflake key pair authentication (PKCS#8 PEM format).
+	// Generate key: openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8
+	PrivateKeyPath string `mapstructure:"private_key_path" jsonschema:"title=Private Key File Path (Snowflake)"`
+	PrivateKeyPEM  string `mapstructure:"private_key_pem" jsonschema:"title=Private Key PEM (Snowflake)"`
+	KeyPassphrase  string `mapstructure:"key_passphrase" jsonschema:"title=Key Passphrase (Snowflake)"`
 }
 
 // RateLimiter sets the API rate limits
@@ -256,6 +262,10 @@ type MCPConfig struct {
 	// DefaultDBAllowed when true allows configuring and discovering system/default
 	// databases (e.g. postgres, mysql, master). Default: false
 	DefaultDBAllowed bool `mapstructure:"default_db_allowed" jsonschema:"title=Allow Default Databases,default=false"`
+
+	// WorkflowTimeout in seconds for JavaScript workflow execution.
+	// Workflows that exceed this duration are interrupted. Default: 5
+	WorkflowTimeout int `mapstructure:"workflow_timeout" jsonschema:"title=Workflow Timeout (seconds),default=5"`
 }
 
 // RedisConfig configures Redis connection

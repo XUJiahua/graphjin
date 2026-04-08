@@ -80,6 +80,24 @@ func assertToolSuccess(t *testing.T, result *mcp.CallToolResult) string {
 	return textContent.Text
 }
 
+func assertToolStructuredMap(t *testing.T, result *mcp.CallToolResult) map[string]any {
+	t.Helper()
+	if result == nil {
+		t.Fatal("Expected success result, got nil")
+	}
+	if result.IsError {
+		t.Fatal("Expected structured success result, got error")
+	}
+	if result.StructuredContent == nil {
+		t.Fatal("Expected StructuredContent, got nil")
+	}
+	out, ok := result.StructuredContent.(map[string]any)
+	if !ok {
+		t.Fatalf("Expected StructuredContent to be map[string]any, got %T", result.StructuredContent)
+	}
+	return out
+}
+
 // =============================================================================
 // Execution Handler Tests
 // =============================================================================
@@ -1790,6 +1808,40 @@ func TestParseDBConfig_SnowflakeRequiresConnectionString(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "snowflake requires connection_string") {
 		t.Fatalf("Expected snowflake connection_string error, got: %v", err)
+	}
+}
+
+func TestParseDBConfig_SnowflakeKeyPair(t *testing.T) {
+	m := map[string]any{
+		"type":              "snowflake",
+		"connection_string": "user@account/db/schema?warehouse=wh&account=acct",
+		"private_key_path":  "/path/to/rsa_key.p8",
+		"key_passphrase":    "secret",
+	}
+
+	conf, err := parseDBConfig(m)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conf.PrivateKeyPath != "/path/to/rsa_key.p8" {
+		t.Fatalf("expected private_key_path, got: %s", conf.PrivateKeyPath)
+	}
+	if conf.KeyPassphrase != "secret" {
+		t.Fatalf("expected key_passphrase, got: %s", conf.KeyPassphrase)
+	}
+
+	// Also test private_key_pem
+	m2 := map[string]any{
+		"type":              "snowflake",
+		"connection_string": "user@account/db/schema?warehouse=wh&account=acct",
+		"private_key_pem":   "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----",
+	}
+	conf2, err := parseDBConfig(m2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if conf2.PrivateKeyPEM == "" {
+		t.Fatal("expected private_key_pem to be set")
 	}
 }
 

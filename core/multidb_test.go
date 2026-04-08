@@ -1510,6 +1510,7 @@ func TestExtractDatabaseJoinValuePreservesNestedChildren(t *testing.T) {
 	}
 }
 
+
 // TestAddForeignKeyCrossDatabaseUnknownDB verifies error when referencing unknown database.
 func TestAddForeignKeyCrossDatabaseUnknownDB(t *testing.T) {
 	srcCols := []sdata.DBColumn{
@@ -1667,5 +1668,29 @@ func TestCloneConfigIsolation(t *testing.T) {
 	}
 	if original.Databases != nil {
 		t.Errorf("original.Databases should still be nil, got %v", original.Databases)
+	}
+}
+
+func TestCloneConfigRoleTablesIsolation(t *testing.T) {
+	original := &Config{
+		DBType: "postgres",
+		Roles: []Role{
+			{
+				Name: "user",
+				Tables: []RoleTable{
+					{Name: "orders", ReadOnly: false},
+				},
+			},
+		},
+	}
+
+	clone := original.clone()
+
+	// Mutate the clone's role tables (simulates NormalizeDatabases behavior)
+	clone.Roles[0].Tables[0].ReadOnly = true
+
+	// Original must be untouched
+	if original.Roles[0].Tables[0].ReadOnly {
+		t.Error("original.Roles[0].Tables[0].ReadOnly was mutated through clone")
 	}
 }

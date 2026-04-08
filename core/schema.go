@@ -2,6 +2,7 @@ package core
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"fmt"
 	"io"
@@ -22,6 +23,10 @@ const schemaTemplate = `# dbinfo:{{if .Type}}{{ .Type }}{{else}}postgres{{end}},
 
 {{- define "database_directive"}}
 {{- if (ne .Database "")}} @database(name: {{ .Database }}){{end}}
+{{- end}}
+
+{{- define "cluster_directive"}}
+{{- if .ClusteringKeys}} @cluster(columns: [{{range $i, $c := .ClusteringKeys}}{{if $i}}, {{end}}"{{$c}}"{{end}}]){{end}}
 {{- end}}
 
 {{- define "relation_directive"}}
@@ -71,7 +76,8 @@ const schemaTemplate = `# dbinfo:{{if .Type}}{{ .Type }}{{else}}postgres{{end}},
 {{range .Tables -}}
 type {{.Name}}
 {{- template "database_directive" .}}
-{{- template "schema_directive" .}} {
+{{- template "schema_directive" .}}
+{{- template "cluster_directive" .}} {
 {{- range .Columns}}{{template "column" .}}{{end}}
 }
 
@@ -136,7 +142,7 @@ func parseDBType(name string) (res [2]string, err error) {
 
 // GenerateSchema generates a db.graphql schema from database introspection
 func GenerateSchema(db *sql.DB, dbType string, blocklist []string) ([]byte, error) {
-	dbinfo, err := sdata.GetDBInfo(db, dbType, blocklist)
+	dbinfo, err := sdata.GetDBInfo(context.Background(), db, dbType, blocklist)
 	if err != nil {
 		return nil, fmt.Errorf("failed to introspect database: %w", err)
 	}

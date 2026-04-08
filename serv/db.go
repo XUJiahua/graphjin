@@ -1,10 +1,12 @@
 package serv
 
 import (
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,9 +15,9 @@ import (
 
 	"github.com/dosco/graphjin/core/v3"
 	"github.com/dosco/graphjin/mongodriver"
-	_ "github.com/dosco/graphjin/oracle11gdriver"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/snowflakedb/gosnowflake"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.uber.org/zap"
@@ -23,7 +25,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 	_ "github.com/sijms/go-ora/v2"
-	_ "github.com/snowflakedb/gosnowflake"
 	_ "modernc.org/sqlite"
 )
 
@@ -53,41 +54,24 @@ func NewDB(conf *Config, openDB bool, log *zap.SugaredLogger, fs core.FS) (*sql.
 // detectDBType detects the database type from the connection string and updates conf.DBType
 func detectDBType(conf *Config) {
 	if cs := conf.DB.ConnString; cs != "" {
-		explicitType := strings.ToLower(strings.TrimSpace(conf.DBType))
-		if explicitType == "" {
-			explicitType = strings.ToLower(strings.TrimSpace(conf.DB.Type))
-		}
-
 		if strings.HasPrefix(cs, "postgres://") || strings.HasPrefix(cs, "postgresql://") || conf.DB.Type == "postgres" {
 			conf.DBType = "postgres"
 		}
 		if strings.HasPrefix(cs, "mysql://") {
-			if explicitType == "" {
-				conf.DBType = "mysql"
-			}
+			conf.DBType = "mysql"
 			conf.DB.ConnString = strings.TrimPrefix(cs, "mysql://")
 		}
 		if strings.HasPrefix(cs, "sqlserver://") {
-			if explicitType == "" {
-				conf.DBType = "mssql"
-			}
+			conf.DBType = "mssql"
 		}
 		if strings.HasPrefix(cs, "oracle://") {
-			if explicitType == "oracle11g" {
-				conf.DBType = "oracle11g"
-			} else if explicitType == "" {
-				conf.DBType = "oracle"
-			}
+			conf.DBType = "oracle"
 		}
 		if strings.HasPrefix(cs, "mongodb://") || strings.HasPrefix(cs, "mongodb+srv://") {
-			if explicitType == "" {
-				conf.DBType = "mongodb"
-			}
+			conf.DBType = "mongodb"
 		}
 		if strings.HasPrefix(cs, "snowflake://") {
-			if explicitType == "" {
-				conf.DBType = "snowflake"
-			}
+			conf.DBType = "snowflake"
 		}
 	}
 }
@@ -113,14 +97,14 @@ func initDBDriver(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf,
 		dc, err = initMssql(conf, openDB, useTelemetry, fs)
 	case "sqlite":
 		dc, err = initSqlite(conf, openDB, useTelemetry, fs)
-	case "oracle", "oracle11g":
-		dc, err = initOracle(conf, openDB, useTelemetry, fs, conf.DBType)
+	case "oracle":
+		dc, err = initOracle(conf, openDB, useTelemetry, fs)
 	case "mongodb":
 		dc, err = initMongo(conf, openDB, useTelemetry, fs)
 	case "snowflake":
 		dc, err = initSnowflake(conf, openDB, useTelemetry, fs)
 	default:
-		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, mssql, sqlite, oracle, oracle11g, mongodb, snowflake", conf.DBType)
+		return nil, fmt.Errorf("unsupported database type %q: supported types are postgres, mysql, mariadb, mssql, sqlite, oracle, mongodb, snowflake", conf.DBType)
 	}
 
 	if err != nil {
@@ -386,7 +370,7 @@ func initSqlite(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, e
 }
 
 // initOracle initializes the oracle database
-func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS, driverName string) (*dbConf, error) {
+func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, error) {
 	var connString string
 	c := conf
 
@@ -405,11 +389,7 @@ func initOracle(conf *Config, openDB, useTelemetry bool, fs core.FS, driverName 
 		connString += "/" + c.DB.DBName
 	}
 
-	if driverName == "" {
-		driverName = "oracle"
-	}
-
-	return &dbConf{driverName: driverName, connString: connString}, nil
+	return &dbConf{driverName: "oracle", connString: connString}, nil
 }
 
 // initMongo initializes the mongodb database using the mongodriver connector
@@ -446,13 +426,87 @@ func initMongo(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, er
 
 // initSnowflake initializes the snowflake database.
 // Snowflake requires a full DSN in connection_string.
+// When private_key_path or private_key_pem is set, key pair (JWT) authentication
+// is used via the gosnowflake driver's built-in support.
 func initSnowflake(conf *Config, openDB, useTelemetry bool, fs core.FS) (*dbConf, error) {
 	connString := strings.TrimSpace(conf.DB.ConnString)
 	if connString == "" {
 		return nil, fmt.Errorf("snowflake requires connection_string")
 	}
 
-	return &dbConf{driverName: "snowflake", connString: connString}, nil
+	keyPath := strings.TrimSpace(conf.DB.PrivateKeyPath)
+	keyPEM := strings.TrimSpace(conf.DB.PrivateKeyPEM)
+
+	// No key pair config — plain DSN passthrough (existing behavior)
+	if keyPath == "" && keyPEM == "" {
+		return &dbConf{driverName: "snowflake", connString: connString}, nil
+	}
+
+	// Load PEM data from file or inline
+	var pemData []byte
+	if keyPath != "" {
+		data, err := fs.Get(keyPath)
+		if err != nil {
+			return nil, fmt.Errorf("snowflake: reading private key file %q: %w", keyPath, err)
+		}
+		pemData = data
+	} else {
+		pemData = []byte(keyPEM)
+	}
+
+	privKey, err := loadSnowflakePrivateKey(pemData, conf.DB.KeyPassphrase)
+	if err != nil {
+		return nil, fmt.Errorf("snowflake: %w", err)
+	}
+
+	cfg, err := gosnowflake.ParseDSN(connString)
+	if err != nil {
+		return nil, fmt.Errorf("snowflake: parsing connection_string: %w", err)
+	}
+
+	cfg.Authenticator = gosnowflake.AuthTypeJwt
+	cfg.PrivateKey = privKey
+
+	connector := gosnowflake.NewConnector(gosnowflake.SnowflakeDriver{}, *cfg)
+	return &dbConf{connector: connector}, nil
+}
+
+// loadSnowflakePrivateKey parses a PKCS#8 PEM-encoded RSA private key,
+// with optional passphrase decryption for encrypted keys.
+func loadSnowflakePrivateKey(pemData []byte, passphrase string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode(pemData)
+	if block == nil {
+		return nil, fmt.Errorf("invalid PEM data: no PEM block found")
+	}
+
+	var derBytes []byte
+
+	//nolint:staticcheck // x509.IsEncryptedPEMBlock is deprecated but needed for encrypted PEM support
+	if x509.IsEncryptedPEMBlock(block) {
+		if passphrase == "" {
+			return nil, fmt.Errorf("private key is encrypted but no key_passphrase provided")
+		}
+		//nolint:staticcheck // x509.DecryptPEMBlock is deprecated but needed for encrypted PEM support
+		decrypted, err := x509.DecryptPEMBlock(block, []byte(passphrase))
+		if err != nil {
+			return nil, fmt.Errorf("decrypting private key: %w (wrong passphrase?)", err)
+		}
+		derBytes = decrypted
+	} else {
+		derBytes = block.Bytes
+	}
+
+	key, err := x509.ParsePKCS8PrivateKey(derBytes)
+	if err != nil {
+		return nil, fmt.Errorf("parsing PKCS#8 private key: %w (ensure key is in PKCS#8 format: openssl pkcs8 -topk8)", err)
+	}
+
+	rsaKey, ok := key.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("private key is not RSA (got %T); Snowflake requires RSA-2048", key)
+	}
+
+	return rsaKey, nil
 }
 
 // loadX509KeyPair loads a X509 key pair from a file system

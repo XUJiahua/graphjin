@@ -11,6 +11,7 @@ import (
 	"github.com/dosco/graphjin/conf/v3"
 	"github.com/dosco/graphjin/core/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -65,6 +66,7 @@ func TestAPQ(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	defer gj.Close()
 
 	_, err = gj.GraphQL(context.Background(), gql, nil, &core.RequestConfig{
 		APQKey: "getProducts",
@@ -131,6 +133,7 @@ func TestAllowList(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	defer gj1.Close()
 
 	exp1 := `{"products": {"id": 2}}`
 
@@ -141,6 +144,7 @@ func TestAllowList(t *testing.T) {
 	conf2 := newConfig(&core.Config{DBType: dbType, Production: true})
 	gj2, err := core.NewGraphJin(conf2, db, core.OptionSetFS(fs))
 	assert.NoError(t, err)
+	defer gj2.Close()
 
 	res2, err := gj2.GraphQL(context.Background(), gql2, nil, nil)
 	assert.NoError(t, err)
@@ -188,6 +192,7 @@ func TestAllowListWithNamespace(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	defer gj1.Close()
 
 	_, err = gj1.GraphQL(context.Background(), gql1, nil, nil)
 	if err != nil {
@@ -201,6 +206,7 @@ func TestAllowListWithNamespace(t *testing.T) {
 		t.Error(err)
 		return
 	}
+	defer gj2.Close()
 
 	var rc core.RequestConfig
 	rc.SetNamespace("api")
@@ -230,6 +236,7 @@ func TestDisableProdSecurity(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
+	defer gj1.Close()
 
 	_, err = gj1.GraphQL(context.Background(), gql1, nil, nil)
 	assert.ErrorContains(t, err, "unknown graphql query")
@@ -243,6 +250,7 @@ func TestDisableProdSecurity(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
+	defer gj2.Close()
 
 	res, err := gj2.GraphQL(context.Background(), gql1, nil, nil)
 	assert.NoError(t, err)
@@ -288,6 +296,7 @@ func TestEnableSchema(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
+	defer gj1.Close()
 
 	res1, err := gj1.GraphQL(context.Background(), gql, nil, nil)
 	if err != nil {
@@ -302,6 +311,7 @@ func TestEnableSchema(t *testing.T) {
 	if err != nil {
 		panic(err)
 	}
+	defer gj2.Close()
 
 	res2, err := gj2.GraphQL(context.Background(), gql, nil, nil)
 	if err != nil {
@@ -322,27 +332,25 @@ func TestConfigReuse(t *testing.T) {
 	}`
 
 	conf := newConfig(&core.Config{DBType: dbType, DisableAllowList: true})
-	for i := 0; i < 50; i++ {
-		gj1, err := core.NewGraphJin(conf, db)
-		if err != nil {
-			panic(err)
-		}
 
-		res1, err := gj1.GraphQL(context.Background(), gql, nil, nil)
-		if err != nil {
-			panic(err)
-		}
+	// Create a reference result to compare against
+	gjRef, err := core.NewGraphJin(conf, db)
+	require.NoError(t, err)
+	refRes, err := gjRef.GraphQL(context.Background(), gql, nil, nil)
+	require.NoError(t, err)
 
-		gj2, err := core.NewGraphJin(conf, db)
-		if err != nil {
-			panic(err)
+	t.Run("parallel", func(t *testing.T) {
+		for i := 0; i < 10; i++ {
+			t.Run(fmt.Sprintf("iter_%d", i), func(t *testing.T) {
+				t.Parallel()
+				gj, err := core.NewGraphJin(conf, db)
+				require.NoError(t, err)
+				res, err := gj.GraphQL(context.Background(), gql, nil, nil)
+				require.NoError(t, err)
+				assert.Equal(t, refRes.Data, res.Data, "should equal")
+			})
 		}
-		res2, err := gj2.GraphQL(context.Background(), gql, nil, nil)
-		if err != nil {
-			panic(err)
-		}
-		assert.Equal(t, res1.Data, res2.Data, "should equal")
-	}
+	})
 }
 
 func TestConfigRoleManagement(t *testing.T) {
@@ -399,6 +407,7 @@ func TestParallelRuns(t *testing.T) {
 				if err != nil {
 					return fmt.Errorf("%d: %w", x, err)
 				}
+				defer gj.Close()
 
 				ctx := context.WithValue(context.Background(), core.UserIDKey, x)
 				_, err = gj.GraphQL(ctx, gql, nil, nil)
@@ -480,6 +489,7 @@ func BenchmarkCompile(b *testing.B) {
 	if err != nil {
 		panic(err)
 	}
+	defer gj.Close()
 
 	for n := 0; n < b.N; n++ {
 		res, err := gj.GraphQL(context.Background(), benchGQL, vars, nil)

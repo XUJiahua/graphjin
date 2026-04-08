@@ -297,12 +297,7 @@ func (ms *mcpServer) handleListDatabases(ctx context.Context, req mcp.CallToolRe
 		Connections:    connections,
 		TotalDatabases: totalDBs,
 	}
-
-	data, err := mcpMarshalJSON(result, true)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to marshal result: %v", err)), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
+	return ms.toolResultJSON("list_databases", req.GetArguments(), result)
 }
 
 // handleDiscoverDatabases scans the local system for running databases
@@ -319,7 +314,7 @@ func (ms *mcpServer) handleDiscoverDatabases(ctx context.Context, req mcp.CallTo
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to marshal result: %v", err)), nil
 	}
-	return mcp.NewToolResultText(string(data)), nil
+	return mcpToolResultJSONBytes(data), nil
 }
 
 func (ms *mcpServer) runDiscovery(args map[string]any) (DiscoverResult, error) {
@@ -1156,7 +1151,7 @@ func buildProbeConnString(dbType, host string, port int, filePath, user, passwor
 			connString += "&database=" + url.QueryEscape(dbName)
 		}
 		return "sqlserver", connString
-	case "oracle", "oracle11g":
+	case "oracle":
 		if port == 0 {
 			port = 1521
 		}
@@ -1166,7 +1161,7 @@ func buildProbeConnString(dbType, host string, port int, filePath, user, passwor
 		}
 		connString := fmt.Sprintf("oracle://%s:%s@%s:%d%s",
 			user, password, host, port, dbPath)
-		return driverForType(dbType), connString
+		return "oracle", connString
 	case "sqlite":
 		return "sqlite", filePath
 	default:
@@ -1246,7 +1241,7 @@ func listDatabaseNames(db *sql.DB, dbType string) ([]string, error) {
 		query = "SELECT schema_name FROM information_schema.schemata"
 	case "mssql":
 		query = "SELECT name FROM sys.databases WHERE database_id > 4"
-	case "oracle", "oracle11g":
+	case "oracle":
 		query = "SELECT username FROM all_users WHERE oracle_maintained = 'N'"
 	case "sqlite":
 		query = "SELECT name FROM sqlite_master WHERE type='table'"
@@ -1262,7 +1257,7 @@ func listDatabaseNames(db *sql.DB, dbType string) ([]string, error) {
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
 		// For Oracle, fall back to alternate query
-		if dbType == "oracle" || dbType == "oracle11g" {
+		if dbType == "oracle" {
 			return listOracleFallback(db)
 		}
 		return nil, err

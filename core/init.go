@@ -182,7 +182,7 @@ func updateTable(conf *Config, dbInfo *sdata.DBInfo, table Table) error {
 
 		if c.Primary {
 			c1.PrimaryKey = true
-			t1.PrimaryCol = *c1
+			t1.PrimaryCols = append(t1.PrimaryCols, *c1)
 		}
 
 		if c.Unique {
@@ -192,6 +192,16 @@ func updateTable(conf *Config, dbInfo *sdata.DBInfo, table Table) error {
 		if c.Array {
 			c1.Array = true
 		}
+	}
+
+	if len(t1.PrimaryCols) > 0 {
+		t1.PrimaryCol = t1.PrimaryCols[0]
+	}
+
+	// Apply partition configuration
+	if table.Partition != nil && table.Partition.Column != "" {
+		t1.PartitionKey = table.Partition.Column
+		t1.PartitionRangeDays = table.Partition.DefaultRangeDays
 	}
 
 	return nil
@@ -351,6 +361,7 @@ func addForeignKey(conf *Config, di *sdata.DBInfo, c Column, t Table, allDBInfos
 		c1.FKeySchema = fk.Schema
 		c1.FKeyTable = fk.Table
 		c1.FKeyCol = c3.Name
+		c1.FKeyIsUnique = c3.PrimaryKey || c3.UniqueKey
 		return nil
 	}
 

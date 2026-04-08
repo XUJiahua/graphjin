@@ -417,7 +417,7 @@ func (d *MSSQLDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 			ctx.WriteString(` CASE WHEN `)
 			ctx.AddParam(Param{Name: ob.KeyVar, Type: "text"})
 			ctx.WriteString(` = `)
-			ctx.WriteString(fmt.Sprintf("'%s'", ob.Key))
+			ctx.WriteString(fmt.Sprintf("'%s'", strings.ReplaceAll(ob.Key, "'", "''")))
 			ctx.WriteString(` THEN `)
 		}
 		if ob.Var != "" {
@@ -428,7 +428,14 @@ func (d *MSSQLDialect) RenderOrderBy(ctx Context, sel *qcode.Select) {
 			ctx.AddParam(Param{Name: ob.Var, Type: "text"})
 			ctx.WriteString(` + ',')`)
 		} else {
+			if ob.IsFunc {
+				ctx.WriteString(strings.ToUpper(ob.Func.Name))
+				ctx.WriteString(`(`)
+			}
 			ctx.ColWithTable(ob.Col.Table, ob.Col.Name)
+			if ob.IsFunc {
+				ctx.WriteString(`)`)
+			}
 		}
 		if ob.KeyVar != "" && ob.Key != "" {
 			ctx.WriteString(` END `)
@@ -1789,7 +1796,7 @@ func (d *MSSQLDialect) renderOrderBy(ctx Context, r InlineChildRenderer, sel *qc
 			ctx.WriteString(`CASE WHEN `)
 			ctx.AddParam(Param{Name: ob.KeyVar, Type: "text"})
 			ctx.WriteString(` = `)
-			ctx.WriteString(fmt.Sprintf("'%s'", ob.Key))
+			ctx.WriteString(fmt.Sprintf("'%s'", strings.ReplaceAll(ob.Key, "'", "''")))
 			ctx.WriteString(` THEN `)
 		}
 
@@ -2579,10 +2586,16 @@ func (d *MSSQLDialect) RenderUpsert(ctx Context, m *qcode.Mutate, insert func(),
 	ctx.Quote(m.Ti.Name)
 	ctx.WriteString(` AS target USING (SELECT `)
 	insert()
-	ctx.WriteString(`) AS source ON target.`)
-	ctx.Quote(m.Ti.PrimaryCol.Name)
-	ctx.WriteString(` = source.`)
-	ctx.Quote(m.Ti.PrimaryCol.Name)
+	ctx.WriteString(`) AS source ON `)
+	for j, pkCol := range m.Ti.PrimaryCols {
+		if j > 0 {
+			ctx.WriteString(` AND `)
+		}
+		ctx.WriteString(`target.`)
+		ctx.Quote(pkCol.Name)
+		ctx.WriteString(` = source.`)
+		ctx.Quote(pkCol.Name)
+	}
 	ctx.WriteString(` WHEN MATCHED THEN UPDATE SET `)
 	updateSet()
 	ctx.WriteString(` WHEN NOT MATCHED THEN INSERT (`)
@@ -2784,7 +2797,7 @@ func (d *MSSQLDialect) RenderMutateToRecordSet(ctx Context, m *qcode.Mutate, n i
 		if col.Set {
 			continue
 		}
-		if col.FieldName == m.Ti.PrimaryCol.Name {
+		if m.Ti.IsPKCol(col.FieldName) {
 			hasPK = true
 		}
 		if i != 0 {
@@ -2816,15 +2829,18 @@ func (d *MSSQLDialect) RenderMutateToRecordSet(ctx Context, m *qcode.Mutate, n i
 	}
 
 	if !hasPK {
-		if i != 0 {
-			ctx.WriteString(`, `)
+		for _, pkCol := range m.Ti.PrimaryCols {
+			if i != 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` `)
+			ctx.WriteString(d.mssqlType(pkCol.Type))
+			ctx.WriteString(` '$.`)
+			ctx.WriteString(pkCol.Name)
+			ctx.WriteString(`'`)
+			i++
 		}
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` `)
-		ctx.WriteString(d.mssqlType(m.Ti.PrimaryCol.Type))
-		ctx.WriteString(` '$.`)
-		ctx.WriteString(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(`'`)
 	}
 
 	ctx.WriteString(`)) AS t`)
@@ -2853,7 +2869,7 @@ func (d *MSSQLDialect) RenderLinearInsert(ctx Context, m *qcode.Mutate, qc *qcod
 			ctx.WriteString(`, `)
 		}
 		ctx.Quote(col.Col.Name)
-		if col.Col.Name == m.Ti.PrimaryCol.Name {
+		if m.Ti.IsPKCol(col.Col.Name) {
 			hasExplicitPK = true
 			pkFieldName = col.FieldName
 		}
@@ -2975,7 +2991,7 @@ func (d *MSSQLDialect) RenderLinearInsert(ctx Context, m *qcode.Mutate, qc *qcod
 			// For explicit PK, we need to find the PK column value and set the variable
 			// Find the PK column and set the variable to its value
 			for _, col := range m.Cols {
-				if col.Col.Name == m.Ti.PrimaryCol.Name {
+				if m.Ti.IsPKCol(col.Col.Name) {
 					ctx.WriteString(`SET @`)
 					ctx.WriteString(varName)
 					ctx.WriteString(` = `)
@@ -3076,9 +3092,14 @@ func (d *MSSQLDialect) RenderLinearUpdate(ctx Context, m *qcode.Mutate, qc *qcod
 
 	// Identity fallback if no columns to update
 	if i == 0 {
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` = `)
-		ctx.Quote(m.Ti.PrimaryCol.Name)
+		for j, pkCol := range m.Ti.PrimaryCols {
+			if j > 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` = `)
+			ctx.Quote(pkCol.Name)
+		}
 	}
 
 	ctx.WriteString(` WHERE `)
@@ -3146,9 +3167,14 @@ func (d *MSSQLDialect) renderChildUpdate(ctx Context, m *qcode.Mutate, qc *qcode
 
 	if i == 0 {
 		// No columns to update - use identity update
-		ctx.Quote(m.Ti.PrimaryCol.Name)
-		ctx.WriteString(` = `)
-		ctx.Quote(m.Ti.PrimaryCol.Name)
+		for j, pkCol := range m.Ti.PrimaryCols {
+			if j > 0 {
+				ctx.WriteString(`, `)
+			}
+			ctx.Quote(pkCol.Name)
+			ctx.WriteString(` = `)
+			ctx.Quote(pkCol.Name)
+		}
 	}
 
 	ctx.WriteString(` WHERE `)
@@ -3267,7 +3293,7 @@ func (d *MSSQLDialect) ModifySelectsForMutation(qc *qcode.QCode) {
 			hasExplicitPK := false
 			var pkName string
 			for _, col := range m.Cols {
-				if col.Col.Name == m.Ti.PrimaryCol.Name {
+				if m.Ti.IsPKCol(col.Col.Name) {
 					hasExplicitPK = true
 					pkName = col.FieldName
 					break

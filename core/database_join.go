@@ -249,6 +249,7 @@ func writeQueryFieldName(buf *bytes.Buffer, actual, alias string) {
 	buf.WriteString(actual)
 }
 
+
 // writeSelectFields writes the field list for a Select, recursing into children.
 func writeSelectFields(buf *bytes.Buffer, sel *qcode.Select, selects []qcode.Select) {
 	first := true

@@ -3,7 +3,12 @@ package psql_test
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/dosco/graphjin/core/v3/internal/psql"
+	"github.com/dosco/graphjin/core/v3/internal/qcode"
+	"github.com/dosco/graphjin/core/v3/internal/sdata"
 )
 
 func simpleQuery(t *testing.T) {
@@ -724,6 +729,223 @@ func TestCompileQuery(t *testing.T) {
 	t.Run("blockedQuery", blockedQuery)
 	t.Run("blockedFunctions", blockedFunctions)
 	t.Run("multiRootSameTable", multiRootSameTable)
+	t.Run("distinctWithAggCount", distinctWithAggCount)
+	t.Run("distinctWithAggMultiple", distinctWithAggMultiple)
+	t.Run("distinctWithAggAndWhere", distinctWithAggAndWhere)
+	t.Run("aggWithoutDistinct", aggWithoutDistinct)
+	t.Run("partitionFilterInSQL", partitionFilterInSQL)
+	t.Run("warehouseColumnProjection", warehouseColumnProjection)
+}
+
+// --- distinct + aggregation tests ---
+// These verify that GROUP BY uses only the distinct columns, not the PK.
+// Bug: __gj_id (PK) was included in GROUP BY making every group unique (count=1).
+
+func distinctWithAggCount(t *testing.T) {
+	gql := `query {
+		products(distinct: [name]) {
+			name
+			count_id
+		}
+	}`
+	sql := compileGQLToPSQLString(t, gql, nil, "user")
+
+	// GROUP BY should only contain the distinct column (name), not the PK (id)
+	if bytes.Contains([]byte(sql), []byte(`GROUP BY`)) {
+		if !bytes.Contains([]byte(sql), []byte(`"name"`)) {
+			t.Error("GROUP BY should contain the distinct column 'name'")
+		}
+		// The PK 'id' should not appear as a raw column in GROUP BY
+		// (it can appear inside count() which is fine)
+		groupByIdx := bytes.Index([]byte(sql), []byte(`GROUP BY`))
+		limitIdx := bytes.Index([]byte(sql), []byte(`LIMIT`))
+		if limitIdx == -1 {
+			limitIdx = len(sql)
+		}
+		groupByClause := sql[groupByIdx:limitIdx]
+		// Check that the group by section doesn't contain a bare "products"."id"
+		// outside of an aggregate function
+		if bytes.Contains([]byte(groupByClause), []byte(`"id"`)) {
+			t.Error("GROUP BY should NOT contain the PK 'id' when distinct + aggregation is used")
+		}
+	}
+}
+
+func distinctWithAggMultiple(t *testing.T) {
+	gql := `query {
+		products(distinct: [name]) {
+			name
+			count_id
+			max_price
+		}
+	}`
+	compileGQLToPSQL(t, gql, nil, "user")
+}
+
+func distinctWithAggAndWhere(t *testing.T) {
+	gql := `query {
+		products(distinct: [name], where: { price: { gt: 10 } }) {
+			name
+			count_id
+		}
+	}`
+	compileGQLToPSQL(t, gql, nil, "user")
+}
+
+func aggWithoutDistinct(t *testing.T) {
+	// Aggregation without distinct should still work (GROUP BY all BCols)
+	gql := `query {
+		products {
+			name
+			count_price
+		}
+	}`
+	compileGQLToPSQL(t, gql, nil, "user")
+}
+
+// compileGQLToPSQLString compiles and returns the SQL string for inspection
+func compileGQLToPSQLString(t *testing.T, gql string,
+	vars map[string]json.RawMessage,
+	role string,
+) string {
+	t.Helper()
+	var v json.RawMessage
+	var err error
+
+	if v, err = json.Marshal(vars); err != nil {
+		t.Fatal(err)
+	}
+
+	vm := make(map[string]json.RawMessage)
+	if err := json.Unmarshal(v, &vm); err != nil {
+		t.Fatal(err)
+	}
+
+	qc, err := qcompile.Compile([]byte(gql), vm, role, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, sqlBytes, err := pcompile.CompileEx(qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return string(sqlBytes)
+}
+
+func partitionFilterInSQL(t *testing.T) {
+	// Self-contained test: create a partitioned schema + compilers
+	pSchema, err := sdata.GetTestPartitionedSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pQCompile, err := qcode.NewCompiler(pSchema, qcode.Config{DBSchema: pSchema.DBSchema()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = pQCompile.AddRole("user", "public", "products", qcode.TRConfig{
+		Query: qcode.QueryConfig{
+			Columns: []string{"id", "name", "price", "created_at"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	pPCompile := psql.NewCompiler(psql.Config{})
+
+	gql := `query {
+		products {
+			id
+			name
+		}
+	}`
+
+	qc, err := pQCompile.Compile([]byte(gql), nil, "user", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, sqlBytes, err := pPCompile.CompileEx(qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sql := string(sqlBytes)
+
+	// The generated SQL should contain the partition bound expression
+	if !strings.Contains(sql, "CURRENT_TIMESTAMP - INTERVAL") {
+		t.Errorf("expected partition bound in SQL, got:\n%s", sql)
+	}
+
+	// Should reference the partition column
+	if !strings.Contains(sql, "created_at") {
+		t.Errorf("expected 'created_at' in SQL, got:\n%s", sql)
+	}
+
+	t.Logf("Generated SQL:\n%s", sql)
+}
+
+func warehouseColumnProjection(t *testing.T) {
+	// Snowflake: ORDER BY column not in user fields should NOT appear in inner SELECT
+	sfSchema, err := sdata.GetTestSnowflakeSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sfQCompile, err := qcode.NewCompiler(sfSchema, qcode.Config{DBSchema: sfSchema.DBSchema()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = sfQCompile.AddRole("user", "public", "products", qcode.TRConfig{
+		Query: qcode.QueryConfig{
+			Columns: []string{"id", "name", "price", "created_at", "user_id"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sfPCompile := psql.NewCompiler(psql.Config{})
+
+	gql := `query {
+		products(order_by: { price: desc }) {
+			id
+			name
+		}
+	}`
+
+	qc, err := sfQCompile.Compile([]byte(gql), nil, "user", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, sqlBytes, err := sfPCompile.CompileEx(qc)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sql := string(sqlBytes)
+
+	// The innermost SELECT column list should only have id and name, NOT price.
+	// Extract the inner SELECT: between "SELECT " and " FROM" in the deepest subquery.
+	// The SQL should have: SELECT "products"."id", "products"."name" FROM
+	// NOT: SELECT "products"."id", "products"."name", "products"."price" FROM
+	innerSelect := sql[strings.LastIndex(sql, `SELECT "products"."`):]
+	innerSelect = innerSelect[:strings.Index(innerSelect, ` FROM`)]
+
+	if strings.Contains(innerSelect, `"price"`) {
+		t.Errorf("Snowflake: ORDER BY column 'price' should not be in inner SELECT columns.\nInner SELECT: %s", innerSelect)
+	}
+
+	// But ORDER BY should still reference price
+	if !strings.Contains(sql, `ORDER BY`) || !strings.Contains(sql, `"price"`) {
+		t.Errorf("Snowflake: ORDER BY clause should still reference 'price'.\nSQL: %s", sql)
+	}
+
+	t.Logf("Generated SQL:\n%s", sql)
 }
 
 var benchGQL = []byte(`query {

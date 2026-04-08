@@ -63,6 +63,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate partition configs
+	for _, t := range c.Tables {
+		if t.Partition != nil {
+			if t.Partition.Column == "" {
+				return fmt.Errorf("table %q: partition column must not be empty", t.Name)
+			}
+			if t.Partition.DefaultRangeDays < 0 {
+				return fmt.Errorf("table %q: partition default_range_days must not be negative", t.Name)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -87,6 +99,12 @@ func (c *Config) clone() *Config {
 	if c.Roles != nil {
 		out.Roles = make([]Role, len(c.Roles))
 		copy(out.Roles, c.Roles)
+		for i, r := range c.Roles {
+			if r.Tables != nil {
+				out.Roles[i].Tables = make([]RoleTable, len(r.Tables))
+				copy(out.Roles[i].Tables, r.Tables)
+			}
+		}
 	}
 
 	return &out
@@ -323,9 +341,27 @@ type DatabaseConfig struct {
 	// MSSQL-specific: trust server certificate without validation
 	TrustServerCertificate *bool `mapstructure:"trust_server_certificate" json:"trust_server_certificate,omitempty" yaml:"trust_server_certificate,omitempty" jsonschema:"title=MSSQL Trust Server Certificate"`
 
+	// Snowflake key pair authentication (PKCS#8 PEM format).
+	// Generate key: openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8
+	PrivateKeyPath string `mapstructure:"private_key_path" json:"private_key_path" yaml:"private_key_path" jsonschema:"title=Private Key File Path (Snowflake)"`
+	PrivateKeyPEM  string `mapstructure:"private_key_pem" json:"private_key_pem" yaml:"private_key_pem" jsonschema:"title=Private Key PEM (Snowflake)"`
+	KeyPassphrase  string `mapstructure:"key_passphrase" json:"key_passphrase" yaml:"key_passphrase" jsonschema:"title=Key Passphrase (Snowflake)"`
+
 	// Read-only mode — blocks all mutations and DDL against this database.
 	// Once set in config, cannot be changed at runtime via MCP tools.
 	ReadOnly bool `mapstructure:"read_only" json:"read_only" yaml:"read_only" jsonschema:"title=Read Only"`
+}
+
+// SnowflakeKeyPairConfig allows external services to inject Snowflake key pair
+// credentials programmatically (e.g., separate pipelines for Marketo, Salesforce, etc.).
+type SnowflakeKeyPairConfig interface {
+	GetAccount() string
+	GetUser() string
+	GetPrivateKeyPEM() []byte
+	GetKeyPassphrase() string
+	GetWarehouse() string
+	GetDatabase() string
+	GetSchema() string
 }
 
 // Configuration for a database table
@@ -341,6 +377,22 @@ type Table struct {
 	Columns   []Column
 	// Permitted order by options
 	OrderBy map[string][]string `mapstructure:"order_by" json:"order_by" yaml:"order_by" jsonschema:"title=Order By Options,example=created_at desc"`
+	// Partition configuration for warehouse-optimized queries (Snowflake, BigQuery).
+	// When set, queries without a filter on the partition column will either get a
+	// default time-range filter injected or produce a warning.
+	Partition *PartitionConfig `mapstructure:"partition" json:"partition,omitempty" yaml:"partition,omitempty" jsonschema:"title=Partition Configuration"`
+}
+
+// PartitionConfig declares the partition key for a warehouse table.
+// When a query does not filter on the partition column:
+//   - If DefaultRangeDays > 0, a filter is auto-injected (e.g., created_at >= now - 30 days)
+//   - Otherwise, a warning is logged
+type PartitionConfig struct {
+	// Column is the partition key column name (e.g., "created_at").
+	Column string `mapstructure:"column" json:"column" yaml:"column" jsonschema:"title=Partition Column,example=created_at"`
+	// DefaultRangeDays is the number of days to auto-filter when no partition filter
+	// is present in the query. Set to 0 to only warn without injecting a filter.
+	DefaultRangeDays int `mapstructure:"default_range_days" json:"default_range_days,omitempty" yaml:"default_range_days,omitempty" jsonschema:"title=Default Range Days,example=30"`
 }
 
 // Configuration for a database table column

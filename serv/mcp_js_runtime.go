@@ -11,12 +11,13 @@ const jsRuntimeResourceURI = "graphjin://syntax/workflow-js"
 
 // JSRuntimeAPI describes the functions exposed in the GraphJin JS runtime.
 type JSRuntimeAPI struct {
-	Runtime       string              `json:"runtime"`
-	RuntimeStatus string              `json:"runtime_status"`
-	EntryPoint    string              `json:"entry_point"`
-	Globals       []JSRuntimeGlobal   `json:"globals"`
-	Functions     []JSRuntimeFunction `json:"functions"`
-	Notes         []string            `json:"notes,omitempty"`
+	Runtime          string              `json:"runtime"`
+	RuntimeStatus    string              `json:"runtime_status"`
+	EntryPoint       string              `json:"entry_point"`
+	WorkflowTimeout  int                 `json:"workflow_timeout_seconds"`
+	Globals          []JSRuntimeGlobal   `json:"globals"`
+	Functions        []JSRuntimeFunction `json:"functions"`
+	Notes            []string            `json:"notes,omitempty"`
 }
 
 // JSRuntimeGlobal describes one global in the JS runtime.
@@ -71,18 +72,20 @@ func (ms *mcpServer) registerJSRuntimeResources() {
 }
 
 func (ms *mcpServer) handleGetJSRuntimeAPI(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	data, err := mcpMarshalJSON(ms.buildJSRuntimeAPI(), true)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
-	}
-	return mcp.NewToolResultText(string(data)), nil
+	return ms.toolResultJSON("get_js_runtime_api", req.GetArguments(), ms.buildJSRuntimeAPI())
 }
 
 func (ms *mcpServer) buildJSRuntimeAPI() JSRuntimeAPI {
+	timeoutSecs := ms.service.conf.MCP.WorkflowTimeout
+	if timeoutSecs <= 0 {
+		timeoutSecs = defaultWorkflowScriptTimeout
+	}
+
 	api := JSRuntimeAPI{
-		Runtime:       "goja",
-		RuntimeStatus: "available",
-		EntryPoint:    "function main(input) { ... } // globals: gj, ctx, input",
+		Runtime:         "goja",
+		RuntimeStatus:   "available",
+		EntryPoint:      "function main(input) { ... } // globals: gj, ctx, input",
+		WorkflowTimeout: timeoutSecs,
 		Globals: []JSRuntimeGlobal{
 			{
 				Name:        "gj",
@@ -125,6 +128,12 @@ func (ms *mcpServer) buildJSRuntimeAPI() JSRuntimeAPI {
 			"Example: var result = gj.tools.executeGraphql({query: 'query GetOrders { orders { id total } }'}); var orders = result.data.orders;",
 			"Example: var tables = gj.tools.listTables().tables;",
 			"Example: var schema = gj.tools.describeTable({table: 'orders'});",
+			"PAGINATION: Queries have a default row limit (typically 20). To fetch all rows, use cursor pagination with variables: " +
+				"var cursor = null; var all = []; while (true) { " +
+				"var r = gj.tools.executeGraphql({query: '{ orders(first: 20, after: $orders_cursor) { id } orders_cursor }', variables: { orders_cursor: cursor }}); " +
+				"var page = r.data.orders; if (!page || page.length === 0) break; " +
+				"all = all.concat(page); cursor = r.data.orders_cursor; if (!cursor) break; }",
+			"PAGINATION NOTE: The cursor variable name MUST match the pattern $<table>_cursor (e.g. $orders_cursor for the orders table). Pass it via the variables object — do NOT string-interpolate cursors into the query.",
 			"Only workflow-callable tools are available inside scripts; config mutation, schema mutation, and workflow management tools are blocked.",
 			"Tool errors throw JavaScript exceptions — use try/catch to handle them.",
 			"Tool-level auth and policy checks are enforced exactly as in direct MCP calls.",

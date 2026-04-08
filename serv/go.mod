@@ -3,11 +3,10 @@ module github.com/dosco/graphjin/serv/v3
 go 1.24.0
 
 require (
-	github.com/dosco/graphjin/auth/v3 v3.14.1
-	github.com/dosco/graphjin/core/v3 v3.14.1
+	github.com/dosco/graphjin/auth/v3 v3.16.0
+	github.com/dosco/graphjin/core/v3 v3.16.0
 	github.com/dosco/graphjin/mongodriver v0.0.0
-	github.com/dosco/graphjin/oracle11gdriver v0.0.0
-	github.com/dosco/graphjin/plugin/otel/v3 v3.14.1
+	github.com/dosco/graphjin/plugin/otel/v3 v3.16.0
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/go-http-utils/headers v0.0.0-20181008091004-fed159eddc2a
 	github.com/go-pkgz/expirable-cache v1.0.0
@@ -44,7 +43,6 @@ replace (
 	github.com/dosco/graphjin/auth/v3 => ../auth
 	github.com/dosco/graphjin/core/v3 => ../core
 	github.com/dosco/graphjin/mongodriver => ../mongodriver
-	github.com/dosco/graphjin/oracle11gdriver => ../oracle11gdriver
 	github.com/dosco/graphjin/plugin/otel/v3 => ../plugin/otel
 )
 

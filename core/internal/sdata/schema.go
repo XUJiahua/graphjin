@@ -18,6 +18,20 @@ type nodeInfo struct {
 	nodeID int32
 }
 
+// CrossDBRel represents a cross-database foreign key relationship.
+// These are stored separately from the graph because they connect tables
+// across different databases — the target table doesn't exist in this schema's
+// graph. Resolution happens at runtime via database_join.go.
+type CrossDBRel struct {
+	SourceTable  DBTable  // local table containing the FK column
+	SourceCol    DBColumn // local FK column
+	TargetDB     string   // remote database name
+	TargetSchema string   // remote schema
+	TargetTable  string   // remote table name
+	TargetCol    string   // remote column name
+	IsOneToOne   bool     // true if target col is PK/unique
+}
+
 type DBSchema struct {
 	dbType            string                  // db type
 	version           int                     // db version
@@ -26,11 +40,14 @@ type DBSchema struct {
 	tables            []DBTable               // tables
 	virtualTables     map[string]VirtualTable // for polymorphic relationships
 	dbFunctions       map[string]DBFunction   // db functions
-	tindex            map[string]nodeInfo     // table index
+	tindex            map[string]nodeInfo     // table index (schema:name → node)
+	nameIndex         map[string][]int32      // name-only index (name → nodeIDs) for cross-schema fallback
 	tableAliasIndex   map[string]nodeInfo     // table alias index
 	edgesIndex        map[string][]edgeInfo   // edges index
 	allEdges          map[int32]TEdge         // all edges
 	relationshipGraph *util.Graph             // relationship graph
+	crossDBRels       []CrossDBRel            // cross-database FK relationships
+	compositeFKs      []CompositeFKInfo       // composite FK metadata (Postgres only)
 }
 
 type RelType int
@@ -64,9 +81,10 @@ type DBRelRight struct {
 
 // DBRel represents a database relationship
 type DBRel struct {
-	Type  RelType
-	Left  DBRelLeft
-	Right DBRelRight
+	Type       RelType
+	Left       DBRelLeft
+	Right      DBRelRight
+	ExtraPairs []ColPair // Additional column pairs for composite FKs
 }
 
 // IsCrossDatabase returns true if this relationship crosses database boundaries.
@@ -97,10 +115,12 @@ func NewDBSchema(
 		virtualTables:     make(map[string]VirtualTable),
 		dbFunctions:       make(map[string]DBFunction),
 		tindex:            make(map[string]nodeInfo),
+		nameIndex:         make(map[string][]int32),
 		tableAliasIndex:   make(map[string]nodeInfo),
 		edgesIndex:        make(map[string][]edgeInfo),
 		allEdges:          make(map[int32]TEdge),
 		relationshipGraph: util.NewGraph(),
+		compositeFKs:      info.CompositeFKs,
 	}
 
 	for _, t := range info.Tables {
@@ -229,6 +249,21 @@ func (s *DBSchema) addRemoteRel(t DBTable) error {
 func (s *DBSchema) addColumnRels(t DBTable) error {
 	var err error
 
+	// Build lookup for composite FK columns belonging to this table.
+	// Key: column name → constraint name
+	compositeCols := make(map[string]string)
+	for _, cfk := range s.compositeFKs {
+		if cfk.Schema == t.Schema && cfk.Table == t.Name {
+			for _, col := range cfk.LocalCols {
+				compositeCols[col] = cfk.ConstraintName
+			}
+		}
+	}
+
+	// Track which composite FK constraints have already had their primary edge added.
+	// Key: constraint name → list of edge IDs (forward + reverse in s.allEdges)
+	compositeEdges := make(map[string][]int32)
+
 	for _, c := range t.Columns {
 		if c.FKeyTable == "" {
 			continue
@@ -242,16 +277,23 @@ func (s *DBSchema) addColumnRels(t DBTable) error {
 			continue
 		}
 
-		// Cross-database FK: create a shadow node for the foreign table
+		// Cross-database FK: store as metadata rather than adding to the graph.
+		// The target table lives in another database and doesn't exist as a
+		// graph node. Path resolution for these is handled by FindCrossDBPath.
 		if c.FKeyDatabase != "" {
-			if err = s.addCrossDatabaseRel(t, c); err != nil {
-				return err
-			}
+			s.crossDBRels = append(s.crossDBRels, CrossDBRel{
+				SourceTable:  t,
+				SourceCol:    c,
+				TargetDB:     c.FKeyDatabase,
+				TargetSchema: c.FKeySchema,
+				TargetTable:  c.FKeyTable,
+				TargetCol:    c.FKeyCol,
+				IsOneToOne:   c.FKeyIsUnique,
+			})
 			continue
 		}
 
-		targetDB := t.Database
-		v, ok := s.getNode(targetDB, c.FKeySchema, c.FKeyTable)
+		v, ok := s.getNode(t.Database, c.FKeySchema, c.FKeyTable)
 		if !ok {
 			return fmt.Errorf("foreign key table not found: %s.%s", c.FKeySchema, c.FKeyTable)
 		}
@@ -260,6 +302,28 @@ func (s *DBSchema) addColumnRels(t DBTable) error {
 		fc, ok := ft.getColumn(c.FKeyCol)
 		if !ok {
 			return fmt.Errorf("foreign key column not found: %s.%s", c.FKeyTable, c.FKeyCol)
+		}
+
+		// Check if this column belongs to a composite FK
+		if conName, isComposite := compositeCols[c.Name]; isComposite {
+			if edgeIDs, already := compositeEdges[conName]; already {
+				// Subsequent column of the composite FK — attach to all existing edges
+				// (forward and reverse, with correct column orientation)
+				for _, eid := range edgeIDs {
+					edge := s.allEdges[eid]
+					if edge.L.Table == c.Table {
+						// Forward edge: local → foreign
+						edge.ExtraPairs = append(edge.ExtraPairs, ColPair{L: c, R: fc})
+					} else {
+						// Reverse edge: foreign → local
+						edge.ExtraPairs = append(edge.ExtraPairs, ColPair{L: fc, R: c})
+					}
+					s.allEdges[eid] = edge
+				}
+				continue
+			}
+			// First column of the composite FK — fall through to add edge normally,
+			// then record the edge IDs
 		}
 
 		var rt RelType
@@ -276,49 +340,89 @@ func (s *DBSchema) addColumnRels(t DBTable) error {
 		if err = s.addToGraph(t, c, ft, fc, rt); err != nil {
 			return err
 		}
+
+		// If this was the first column of a composite FK, record the edge IDs
+		// (both forward and reverse edges)
+		if conName, isComposite := compositeCols[c.Name]; isComposite {
+			k1 := t.Schema + ":" + t.Name
+			k2 := c.FKeySchema + ":" + c.FKeyTable
+			fn := s.tindex[k1].nodeID
+			tn := s.tindex[k2].nodeID
+			var edgeIDs []int32
+			for eid, edge := range s.allEdges {
+				if (edge.From == fn && edge.To == tn && edge.L.Name == c.Name) ||
+					(edge.From == tn && edge.To == fn && edge.R.Name == c.Name) {
+					edgeIDs = append(edgeIDs, eid)
+				}
+			}
+			compositeEdges[conName] = edgeIDs
+		}
 	}
 	return nil
 }
 
-// addCrossDatabaseRel adds a relationship edge for a cross-database foreign key.
-// It creates a shadow node in the local schema graph representing the foreign table
-// in the target database. This shadow node exists only for path-finding; actual SQL
-// compilation uses the target database's own schema/compiler.
-func (s *DBSchema) addCrossDatabaseRel(t DBTable, c DBColumn) error {
-	var shadowTable DBTable
-	if v, exists := s.getNode(c.FKeyDatabase, c.FKeySchema, c.FKeyTable); exists {
-		shadowTable = s.tables[v.nodeID]
-	} else {
-		shadowTable = DBTable{
-			Name:     c.FKeyTable,
-			Schema:   c.FKeySchema,
-			Database: c.FKeyDatabase,
-		}
-		s.addNode(shadowTable)
-	}
-
-	// Shadow column representing the FK target column
-	fc := DBColumn{
-		Name:     c.FKeyCol,
-		Schema:   c.FKeySchema,
-		Table:    c.FKeyTable,
-		Database: c.FKeyDatabase,
-	}
-
-	rt := RelOneToMany
-	if shadowTable.Name != "" {
-		if col, ok := shadowTable.getColumn(c.FKeyCol); ok {
-			fc = col
-			switch {
-			case c.FKRecursive:
-				rt = RelRecursive
-			case col.UniqueKey:
-				rt = RelOneToOne
+// FindCrossDBPath checks cross-database FK metadata for a relationship between
+// two tables identified by their unqualified names (as used in GraphQL queries).
+// Returns a synthetic TPath if found, without requiring the target table to be
+// a node in the graph.
+func (s *DBSchema) FindCrossDBPath(childName, parentName string) (TPath, bool) {
+	for _, rel := range s.crossDBRels {
+		// Forward: source table is the parent (has the FK), target is the child
+		// e.g. job_crew.employee_id → ats:employees.id
+		// GraphQL: { job_crew { employees { ... } } }
+		// FindPath is called as FindPath("employees", "job_crew")
+		if rel.SourceTable.Name == parentName && rel.TargetTable == childName {
+			relType := RelOneToMany
+			if rel.IsOneToOne {
+				relType = RelOneToOne
 			}
+			return TPath{
+				Rel: relType,
+				LT:  rel.SourceTable,
+				LC:  rel.SourceCol,
+				RT: DBTable{
+					Name:     rel.TargetTable,
+					Schema:   rel.TargetSchema,
+					Database: rel.TargetDB,
+				},
+				RC: DBColumn{
+					Name:     rel.TargetCol,
+					Schema:   rel.TargetSchema,
+					Table:    rel.TargetTable,
+					Database: rel.TargetDB,
+				},
+			}, true
+		}
+		// Reverse: child has the FK, parent is the remote target
+		if rel.TargetTable == parentName && rel.SourceTable.Name == childName {
+			relType := RelOneToOne
+			if rel.IsOneToOne {
+				relType = RelOneToMany
+			}
+			return TPath{
+				Rel: relType,
+				LT: DBTable{
+					Name:     rel.TargetTable,
+					Schema:   rel.TargetSchema,
+					Database: rel.TargetDB,
+				},
+				LC: DBColumn{
+					Name:     rel.TargetCol,
+					Schema:   rel.TargetSchema,
+					Table:    rel.TargetTable,
+					Database: rel.TargetDB,
+				},
+				RT:  rel.SourceTable,
+				RC:  rel.SourceCol,
+			}, true
 		}
 	}
+	return TPath{}, false
+}
 
-	return s.addToGraph(t, c, shadowTable, fc, rt)
+// GetCrossDBRels returns all cross-database relationships in the schema.
+func (s *DBSchema) GetCrossDBRels() []CrossDBRel {
+	return s.crossDBRels
 }
 
 // addVirtual adds a virtual table to the schema
