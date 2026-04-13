@@ -173,6 +173,13 @@ func (gj *graphjinEngine) finalizeDatabaseSchema(ctx *dbContext) error {
 		return fmt.Errorf("database %s: add foreign keys failed: %w", ctx.name, err)
 	}
 
+	// Process composite foreign keys configured for this database. Must run
+	// after addForeignKeys so per-column FK metadata is already populated
+	// when we validate each composite FK's local columns.
+	if err := addCompositeForeignKeys(gj.conf, ctx.dbinfo, ctx.name); err != nil {
+		return fmt.Errorf("database %s: add composite foreign keys failed: %w", ctx.name, err)
+	}
+
 	// Project the referenced target-database tables into the local DBInfo so the
 	// local qcode compiler can validate nested child fields and same-database
 	// nested relationships before runtime handoff to the target database.

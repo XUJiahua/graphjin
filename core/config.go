@@ -375,12 +375,41 @@ type Table struct {
 	Database  string `mapstructure:"database" json:"database" yaml:"database" jsonschema:"title=Database"`
 	Blocklist []string
 	Columns   []Column
+	// CompositeForeignKeys declares multi-column foreign keys that cannot be
+	// expressed via per-column `related_to` entries. Each declaration becomes a
+	// single composite edge in the relationship graph (instead of N independent
+	// single-column edges), so nested queries JOIN on ALL columns ANDed together.
+	//
+	// The listed `columns` must already have matching per-column `related_to`
+	// entries on the same target table; this config merges those parallel edges
+	// into one composite edge. Columns that do not yet have a `related_to` are
+	// ignored (with a warning).
+	CompositeForeignKeys []CompositeForeignKey `mapstructure:"composite_related_to" json:"composite_related_to,omitempty" yaml:"composite_related_to,omitempty" jsonschema:"title=Composite Foreign Keys"`
 	// Permitted order by options
 	OrderBy map[string][]string `mapstructure:"order_by" json:"order_by" yaml:"order_by" jsonschema:"title=Order By Options,example=created_at desc"`
 	// Partition configuration for warehouse-optimized queries (Snowflake, BigQuery).
 	// When set, queries without a filter on the partition column will either get a
 	// default time-range filter injected or produce a warning.
 	Partition *PartitionConfig `mapstructure:"partition" json:"partition,omitempty" yaml:"partition,omitempty" jsonschema:"title=Partition Configuration"`
+}
+
+// CompositeForeignKey declares a multi-column foreign key from the enclosing
+// Table to another table. The local columns and the referenced columns must be
+// listed in the same order; each position i creates a predicate
+// `local.columns[i] = target.ref_columns[i]` and all predicates are ANDed.
+type CompositeForeignKey struct {
+	// Name is an optional constraint name used for diagnostics. A stable name is
+	// generated from table + column list when omitted.
+	Name string `mapstructure:"name" json:"name,omitempty" yaml:"name,omitempty"`
+	// Columns are the local columns in this table that participate in the key,
+	// in the same order as RefColumns.
+	Columns []string `mapstructure:"columns" json:"columns" yaml:"columns" jsonschema:"title=Local Columns"`
+	// Table is the referenced table in the form "schema.table" or "table"
+	// (when the table lives in the default schema).
+	Table string `mapstructure:"related_to" json:"related_to" yaml:"related_to" jsonschema:"title=Referenced Table,example=other_table"`
+	// RefColumns are the columns in the referenced table, in the same order as
+	// Columns. Must have the same length as Columns.
+	RefColumns []string `mapstructure:"related_cols" json:"related_cols" yaml:"related_cols" jsonschema:"title=Referenced Columns"`
 }
 
 // PartitionConfig declares the partition key for a warehouse table.

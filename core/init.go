@@ -321,6 +321,109 @@ func addForeignKeys(conf *Config, di *sdata.DBInfo, targetDB string, allDBInfos 
 	return nil
 }
 
+// addCompositeForeignKeys merges user-declared composite FKs (from the YAML
+// `composite_related_to` stanza) into di.CompositeFKs so that downstream
+// schema building (sdata.NewDBSchema → addColumnRels) collapses N per-column
+// edges into a single composite edge with ExtraPairs.
+//
+// Each composite FK column must already carry a matching per-column
+// `related_to` entry on the same target table; this function only MERGES
+// pre-existing edges. That constraint keeps the implementation independent
+// from the single-column FK pipeline (no ambiguity about which target table
+// a column points at) and lets the existing composite-edge machinery in
+// sdata.addColumnRels do all the heavy lifting without modification.
+func addCompositeForeignKeys(conf *Config, di *sdata.DBInfo, targetDB string) error {
+	for _, t := range conf.Tables {
+		if t.Database != targetDB {
+			continue
+		}
+		if t.Type == "polymorphic" {
+			continue
+		}
+		if len(t.CompositeForeignKeys) == 0 {
+			continue
+		}
+
+		schema := t.Schema
+		if schema == "" {
+			schema = di.Schema
+		}
+
+		for i, cfk := range t.CompositeForeignKeys {
+			if len(cfk.Columns) < 2 {
+				return fmt.Errorf(
+					"config: composite_related_to on table '%s' entry %d: at least two local columns are required",
+					t.Name, i)
+			}
+			if len(cfk.Columns) != len(cfk.RefColumns) {
+				return fmt.Errorf(
+					"config: composite_related_to on table '%s' entry %d: columns (%d) and related_cols (%d) must have the same length",
+					t.Name, i, len(cfk.Columns), len(cfk.RefColumns))
+			}
+			if cfk.Table == "" {
+				return fmt.Errorf(
+					"config: composite_related_to on table '%s' entry %d: related_to target table is required",
+					t.Name, i)
+			}
+
+			// Accept "schema.table" or bare "table" (defaults to di.Schema).
+			fkSchema := di.Schema
+			fkTable := cfk.Table
+			if idx := strings.IndexByte(cfk.Table, '.'); idx != -1 {
+				fkSchema = cfk.Table[:idx]
+				fkTable = cfk.Table[idx+1:]
+			}
+
+			// Validate each local column:
+			//   a) exists in this table
+			//   b) already carries a per-column `related_to` to the same target table
+			//   c) the referenced column exists in the target table
+			for k, col := range cfk.Columns {
+				c1, err := di.GetColumn(schema, t.Name, col)
+				if err != nil {
+					return fmt.Errorf(
+						"config: composite_related_to on table '%s' entry %d: local column '%s' not found: %w",
+						t.Name, i, col, err)
+				}
+				if c1.FKeyTable == "" {
+					return fmt.Errorf(
+						"config: composite_related_to on table '%s' entry %d: local column '%s' must first declare a single-column `related_to` to '%s'",
+						t.Name, i, col, fkTable)
+				}
+				if c1.FKeyTable != fkTable {
+					return fmt.Errorf(
+						"config: composite_related_to on table '%s' entry %d: local column '%s' has related_to '%s' but composite FK targets '%s'",
+						t.Name, i, col, c1.FKeyTable, fkTable)
+				}
+				if _, err := di.GetColumn(fkSchema, fkTable, cfk.RefColumns[k]); err != nil {
+					return fmt.Errorf(
+						"config: composite_related_to on table '%s' entry %d: referenced column '%s.%s' not found: %w",
+						t.Name, i, fkTable, cfk.RefColumns[k], err)
+				}
+			}
+
+			// Generate a stable, collision-free constraint name so multiple
+			// composite FKs on the same table don't clash and can't conflict
+			// with DB-discovered constraint names.
+			conName := cfk.Name
+			if conName == "" {
+				conName = fmt.Sprintf("__gj_yaml_%s_%s_%d", t.Name, fkTable, i)
+			}
+
+			di.CompositeFKs = append(di.CompositeFKs, sdata.CompositeFKInfo{
+				Schema:         schema,
+				Table:          t.Name,
+				ConstraintName: conName,
+				LocalCols:      append([]string(nil), cfk.Columns...),
+				FKeySchema:     fkSchema,
+				FKeyTable:      fkTable,
+				FKeyCols:       append([]string(nil), cfk.RefColumns...),
+			})
+		}
+	}
+	return nil
+}
+
 // addForeignKey adds a foreign key to the database info.
 // allDBInfos is used to resolve cross-database FK references.
 func addForeignKey(conf *Config, di *sdata.DBInfo, c Column, t Table, allDBInfos map[string]*sdata.DBInfo) error {
