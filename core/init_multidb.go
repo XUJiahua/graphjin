@@ -467,6 +467,7 @@ func cloneProjectedCrossDBTable(t sdata.DBTable, targetDB string) sdata.DBTable 
 	out.Func = t.Func
 	out.SecondaryCol = t.SecondaryCol
 	out.SecondaryCol.Database = targetDB
+	out.Plural = t.Plural
 
 	return out
 }

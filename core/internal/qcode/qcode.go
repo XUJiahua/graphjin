@@ -948,6 +948,14 @@ func (co *Compiler) setSingular(fieldName string, sel *Select) {
 		return
 	}
 
+	// Explicit table-level plural override beats the heuristic below. Use
+	// this when the relationship is inherently 1:N but the parent-side FK
+	// column isn't marked unique, which would otherwise trip the heuristic
+	// and collapse the result to a single object.
+	if sel.Ti.Plural {
+		return
+	}
+
 	if (sel.Rel.Type == sdata.RelOneToMany && !sel.Rel.Right.Col.Array) ||
 		sel.Rel.Type == sdata.RelPolymorphic {
 		sel.Singular = true

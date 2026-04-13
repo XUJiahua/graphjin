@@ -385,6 +385,13 @@ type Table struct {
 	// into one composite edge. Columns that do not yet have a `related_to` are
 	// ignored (with a warning).
 	CompositeForeignKeys []CompositeForeignKey `mapstructure:"composite_related_to" json:"composite_related_to,omitempty" yaml:"composite_related_to,omitempty" jsonschema:"title=Composite Foreign Keys"`
+	// Plural, when true, forces nested selections of this table to return a
+	// JSON array rather than a single object, overriding the automatic
+	// singular/plural heuristic. Use this for tables where the relationship
+	// from the parent is inherently 1:N but the primary FK column on the
+	// parent side is not unique (so graphjin would otherwise collapse the
+	// result to a single row).
+	Plural bool `mapstructure:"plural" json:"plural,omitempty" yaml:"plural,omitempty" jsonschema:"title=Plural"`
 	// Permitted order by options
 	OrderBy map[string][]string `mapstructure:"order_by" json:"order_by" yaml:"order_by" jsonschema:"title=Order By Options,example=created_at desc"`
 	// Partition configuration for warehouse-optimized queries (Snowflake, BigQuery).

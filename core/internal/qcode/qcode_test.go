@@ -124,6 +124,50 @@ func TestCompile4(t *testing.T) {
 	}
 }
 
+func TestPolymorphicPluralOverride(t *testing.T) {
+	di := sdata.GetTestDBInfo()
+	di.VTables[0].Plural = true
+
+	schema, err := sdata.NewDBSchema(di, nil)
+	if err != nil {
+		t.Fatalf("NewDBSchema() error: %v", err)
+	}
+
+	qcCompiler, err := qcode.NewCompiler(schema, qcode.Config{})
+	if err != nil {
+		t.Fatalf("NewCompiler() error: %v", err)
+	}
+
+	qc, err := qcCompiler.Compile([]byte(`
+	query {
+		notifications {
+			subject {
+				... on users {
+					email
+				}
+				... on products {
+					name
+				}
+			}
+		}
+	}`), nil, "user", "")
+	if err != nil {
+		t.Fatalf("Compile() error: %v", err)
+	}
+
+	for _, sel := range qc.Selects {
+		if sel.FieldName != "subject" || sel.Rel.Type != sdata.RelPolymorphic {
+			continue
+		}
+		if sel.Singular {
+			t.Fatal("polymorphic subject select should remain plural when virtual table Plural is set")
+		}
+		return
+	}
+
+	t.Fatal("polymorphic subject select not found")
+}
+
 // TestWhereFKColumnNotMisinterpretedAsRelationship verifies that filtering on a
 // foreign key column (e.g. customer_id on purchases) uses a simple column filter,
 // not a relationship join to the customers table.

@@ -204,6 +204,12 @@ func updateTable(conf *Config, dbInfo *sdata.DBInfo, table Table) error {
 		t1.PartitionRangeDays = table.Partition.DefaultRangeDays
 	}
 
+	// Apply plural override (forces nested selections to return an array
+	// instead of a single object, bypassing qcode's singular heuristic).
+	if table.Plural {
+		t1.Plural = true
+	}
+
 	return nil
 }
 
@@ -291,6 +297,7 @@ func addVirtualTable(conf *Config, di *sdata.DBInfo, t Table) error {
 		IDColumn:   c.Name,
 		TypeColumn: fk.Table,
 		FKeyColumn: fk.Column,
+		Plural:     t.Plural,
 	})
 
 	return nil

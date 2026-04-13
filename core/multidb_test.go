@@ -1365,6 +1365,52 @@ func TestProjectCrossDatabaseTablesAllowsNestedChildFields(t *testing.T) {
 	}
 }
 
+func TestProjectCrossDatabaseTablesPreservesPluralOverride(t *testing.T) {
+	srcCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "users", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "main",
+		},
+		{
+			Schema: "public", Table: "users", Name: "latest_audit_log_id", Type: "bigint",
+			Database: "main", FKeyDatabase: "logs", FKeySchema: "public", FKeyTable: "audit_logs", FKeyCol: "id",
+		},
+	}
+	srcDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "main", srcCols, nil, nil)
+
+	tgtCols := []sdata.DBColumn{
+		{
+			Schema: "public", Table: "audit_logs", Name: "id", Type: "bigint",
+			NotNull: true, PrimaryKey: true, UniqueKey: true, Database: "logs",
+		},
+		{
+			Schema: "public", Table: "audit_logs", Name: "action", Type: "text",
+			NotNull: false, Database: "logs",
+		},
+	}
+	tgtDBInfo := sdata.NewDBInfo("postgres", 140000, "public", "logs", tgtCols, nil, nil)
+	tgtDBInfo.Tables[0].Plural = true
+
+	gj := &graphjinEngine{}
+	allDBInfos := map[string]*sdata.DBInfo{
+		"main": srcDBInfo,
+		"logs": tgtDBInfo,
+	}
+
+	if err := gj.projectCrossDatabaseTables(srcDBInfo, "main", allDBInfos); err != nil {
+		t.Fatalf("projectCrossDatabaseTables() error: %v", err)
+	}
+
+	projected, err := srcDBInfo.GetTable("public", "audit_logs")
+	if err != nil {
+		t.Fatalf("projected table not found: %v", err)
+	}
+
+	if !projected.Plural {
+		t.Fatal("projected table should preserve Plural override from target database")
+	}
+}
+
 func TestProjectCrossDatabaseTablesSupportsNestedTargetRelationsWithDuplicateNames(t *testing.T) {
 	srcCols := []sdata.DBColumn{
 		{
@@ -1509,7 +1555,6 @@ func TestExtractDatabaseJoinValuePreservesNestedChildren(t *testing.T) {
 		t.Fatalf("extractDatabaseJoinValue() = %s, want %s", got, want)
 	}
 }
-
 
 // TestAddForeignKeyCrossDatabaseUnknownDB verifies error when referencing unknown database.
 func TestAddForeignKeyCrossDatabaseUnknownDB(t *testing.T) {

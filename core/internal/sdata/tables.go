@@ -72,7 +72,11 @@ type DBTable struct {
 	ClusteringKeys     []string // Snowflake clustering key columns (normalized to snake_case)
 	PartitionKey       string   // Partition column name (from config, e.g., "created_at")
 	PartitionRangeDays int      // Default range in days for auto-injected partition filter (0 = warn only)
-	colMap             map[string]int
+	// Plural forces nested selections of this table to return an array
+	// instead of a single object, overriding qcode's singular heuristic.
+	// Populated from Config.Tables[].Plural.
+	Plural bool
+	colMap map[string]int
 }
 
 // VirtualTable holds the virtual table information
@@ -81,6 +85,7 @@ type VirtualTable struct {
 	IDColumn   string
 	TypeColumn string
 	FKeyColumn string
+	Plural     bool
 }
 
 // GetDBInfo returns the database schema information.
