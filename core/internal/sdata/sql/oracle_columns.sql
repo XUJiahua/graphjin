@@ -97,4 +97,6 @@ LEFT JOIN (
 ) fk  ON fk.table_name  = tc.table_name  AND fk.column_name  = tc.column_name
      AND fk.rn = 1
 WHERE tc.table_name NOT LIKE 'DR$%'
+  AND tc.table_name NOT LIKE 'APEX_%'
+  AND tc.table_name NOT LIKE 'WWV_FLOW_%'
 ORDER BY tc.table_name, tc.column_id

@@ -99,4 +99,6 @@ WHERE tc.owner NOT IN (
     'XS$NULL', 'OJVMSYS', 'ORACLE_OCM'
 )
   AND tc.table_name NOT LIKE 'DR$%'
+  AND tc.table_name NOT LIKE 'APEX_%'
+  AND tc.table_name NOT LIKE 'WWV_FLOW_%'
 ORDER BY tc.owner, tc.table_name, tc.column_id
