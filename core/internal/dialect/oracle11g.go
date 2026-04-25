@@ -82,6 +82,11 @@ type oracle11gProjection struct {
 	FieldName string
 	ValueType string
 	Hidden    bool
+	// AggFunc, when non-empty, makes this projection render as an aggregate
+	// expression (e.g. COUNT("ID")) aliased to Source. AggArgs supplies the
+	// function arguments. AggFunc takes precedence over Col-based rendering.
+	AggFunc string
+	AggArgs []qcode.Arg
 }
 
 type oracle11gCompileState struct {
@@ -328,12 +333,27 @@ func (b *oracle11gSQLBuilder) build() string {
 		b.writeExp(&inner, b.sel.Where.Exp)
 	}
 
+	b.writeGroupBy(&inner)
+
 	if len(b.sel.OrderBy) != 0 {
 		inner.WriteString(" ORDER BY ")
 		b.writeOrderBy(&inner)
 	}
 
 	return b.wrapPaging(inner.String())
+}
+
+func (b *oracle11gSQLBuilder) writeGroupBy(buf *bytes.Buffer) {
+	if !b.sel.GroupCols || len(b.sel.BCols) == 0 {
+		return
+	}
+	buf.WriteString(" GROUP BY ")
+	for i, col := range b.sel.BCols {
+		if i != 0 {
+			buf.WriteString(", ")
+		}
+		buf.WriteString(b.quote(b.dbColName(col.Col)))
+	}
 }
 
 func (b *oracle11gSQLBuilder) initProjections() {
@@ -353,6 +373,24 @@ func (b *oracle11gSQLBuilder) initProjections() {
 			Hidden:    hidden,
 		})
 		seen[col.Col.Name] = struct{}{}
+	}
+
+	for _, f := range b.sel.Fields {
+		if f.Type != qcode.FieldTypeFunc {
+			continue
+		}
+		if f.SkipRender == qcode.SkipTypeDrop ||
+			f.SkipRender == qcode.SkipTypeRemote ||
+			f.SkipRender == qcode.SkipTypeDatabaseJoin {
+			continue
+		}
+		b.projections = append(b.projections, oracle11gProjection{
+			Source:    f.FieldName,
+			FieldName: f.FieldName,
+			ValueType: f.Func.Type,
+			AggFunc:   f.Func.Name,
+			AggArgs:   f.Args,
+		})
 	}
 
 	if !b.sel.Paging.Cursor {
@@ -403,6 +441,12 @@ func (b *oracle11gSQLBuilder) writeColumns(buf *bytes.Buffer) {
 		if i != 0 {
 			buf.WriteString(", ")
 		}
+		if col.AggFunc != "" {
+			b.writeAggregate(buf, col)
+			buf.WriteString(" AS ")
+			buf.WriteString(b.quote(col.Source))
+			continue
+		}
 		source := b.dbColName(col.Col)
 		buf.WriteString(b.quote(source))
 		if source != col.Source {
@@ -410,6 +454,30 @@ func (b *oracle11gSQLBuilder) writeColumns(buf *bytes.Buffer) {
 			buf.WriteString(b.quote(col.Source))
 		}
 	}
+}
+
+func (b *oracle11gSQLBuilder) writeAggregate(buf *bytes.Buffer, p oracle11gProjection) {
+	buf.WriteString(strings.ToUpper(p.AggFunc))
+	buf.WriteString("(")
+	first := true
+	for _, a := range p.AggArgs {
+		if a.Name != "" {
+			continue
+		}
+		if !first {
+			buf.WriteString(", ")
+		}
+		first = false
+		switch a.Type {
+		case qcode.ArgTypeCol:
+			buf.WriteString(b.quote(b.dbColName(a.Col)))
+		case qcode.ArgTypeVar:
+			buf.WriteString(b.addArgParam(a.Val, a.DType))
+		default:
+			b.writeLiteral(buf, a.Val, qcode.ValStr)
+		}
+	}
+	buf.WriteString(")")
 }
 
 func (b *oracle11gSQLBuilder) writeTable(buf *bytes.Buffer) {

@@ -164,6 +164,236 @@ func TestOracle11gCompileTreeSkipsDroppedRoot(t *testing.T) {
 	}
 }
 
+func TestOracle11gWriteColumnsRendersAggregateFunction(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args: []qcode.Arg{
+						{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}},
+					},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `COUNT("ID") AS "COUNT_ID"`) {
+		t.Fatalf("expected COUNT(\"ID\") AS \"COUNT_ID\" in SQL, got: %s", got)
+	}
+	if !strings.Contains(got, `FROM "PUBLIC"."ORDERS"`) {
+		t.Fatalf("expected FROM \"PUBLIC\".\"ORDERS\", got: %s", got)
+	}
+}
+
+func TestOracle11gWriteColumnsRendersMultipleAggregates(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}}},
+				},
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "sum_amount",
+					Func:      sdata.DBFunction{Name: "sum", Type: "bigint"},
+					Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "amount"}}},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `COUNT("ID") AS "COUNT_ID", SUM("AMOUNT") AS "SUM_AMOUNT"`) {
+		t.Fatalf("expected both aggregates comma-separated, got: %s", got)
+	}
+}
+
+func TestOracle11gAggregateWithSingularStillCapsRownum(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field:    qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:       sdata.DBTable{Name: "orders", Schema: "public"},
+			Singular: true,
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}}},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `ROWNUM <= 1`) {
+		t.Fatalf("expected ROWNUM <= 1 for @object aggregate, got: %s", got)
+	}
+	if !strings.Contains(got, `COUNT("ID") AS "COUNT_ID"`) {
+		t.Fatalf("expected COUNT(\"ID\") AS \"COUNT_ID\", got: %s", got)
+	}
+}
+
+func TestOracle11gAggregateUsesOriginalColumnName(t *testing.T) {
+	d := &Oracle11gDialect{}
+	d.SetNameMap([]sdata.DBTable{{
+		Name:     "orders",
+		OrigName: "Orders",
+		Columns: []sdata.DBColumn{{
+			Name:     "row_id",
+			OrigName: "ROW_ID",
+			Table:    "orders",
+		}},
+	}})
+
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_row_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args: []qcode.Arg{
+						{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "row_id", OrigName: "ROW_ID"}},
+					},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `COUNT("ROW_ID")`) {
+		t.Fatalf("expected aggregate to reference original column name, got: %s", got)
+	}
+}
+
+func TestOracle11gCompileSelectEmitsAggregateColumnsInPlan(t *testing.T) {
+	state := &oracle11gCompileState{
+		qc: &qcode.QCode{
+			Selects: []qcode.Select{{
+				Field: qcode.Field{ID: 0, FieldName: "summary"},
+				Table: "orders",
+				Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+				Fields: []qcode.Field{
+					{
+						Type:      qcode.FieldTypeFunc,
+						FieldName: "count_id",
+						Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+						Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}}},
+					},
+				},
+				GroupCols: true,
+			}},
+		},
+		dialect: &Oracle11gDialect{},
+	}
+
+	q := state.compileSelect(&state.qc.Selects[0])
+
+	if len(q.Columns) != 1 {
+		t.Fatalf("plan.Columns length = %d, want 1", len(q.Columns))
+	}
+	if q.Columns[0].FieldName != "count_id" {
+		t.Fatalf("plan.Columns[0].FieldName = %q, want %q", q.Columns[0].FieldName, "count_id")
+	}
+	if q.Columns[0].Source != "count_id" {
+		t.Fatalf("plan.Columns[0].Source = %q, want %q", q.Columns[0].Source, "count_id")
+	}
+	if !strings.Contains(q.SQL, `COUNT("ID") AS "COUNT_ID"`) {
+		t.Fatalf("plan.SQL missing aggregate: %s", q.SQL)
+	}
+}
+
+func TestOracle11gAggregateWithBaseColsEmitsGroupBy(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			BCols: []qcode.Column{{
+				Col:       sdata.DBColumn{Name: "category"},
+				FieldName: "category",
+			}},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}}},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `GROUP BY "CATEGORY"`) {
+		t.Fatalf("expected GROUP BY \"CATEGORY\", got: %s", got)
+	}
+}
+
+func TestOracle11gPureAggregateOmitsGroupBy(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_id",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args:      []qcode.Arg{{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}}},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if strings.Contains(got, `GROUP BY`) {
+		t.Fatalf("pure-aggregate query should not emit GROUP BY, got: %s", got)
+	}
+}
+
 func TestOracle11gWriteOrderByPreservesNullOrdering(t *testing.T) {
 	b := oracle11gSQLBuilder{
 		sel: &qcode.Select{
