@@ -148,6 +148,12 @@ type Field struct {
 	Name        string
 	FieldName   string
 	FieldFilter Filter
+	// AggFilter, when non-empty on a FieldTypeFunc field, wraps the aggregate's
+	// argument in CASE WHEN <AggFilter> THEN <arg> END (e.g.
+	// count_id(if: { status: { eq: "active" } }) → COUNT(CASE WHEN status='active'
+	// THEN id END)). Distinct from FieldFilter, which gates the entire field
+	// projection from the outside (CASE around the value).
+	AggFilter   Filter
 	Args        []Arg
 	SkipRender  SkipType
 }

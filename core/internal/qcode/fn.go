@@ -62,6 +62,16 @@ type funcInfo struct {
 func (co *Compiler) isFunctionEx(sel *Select, name string, f graph.Field) (
 	fi funcInfo, isFunc bool, err error,
 ) {
+	// Two-pass: an exact match (FUNC(args)) wins immediately; otherwise pick
+	// the longest registered name that is a prefix of `name` followed by "_".
+	// Map iteration is randomized, so ranking by length is required to avoid
+	// flaky dispatch when one function name is a prefix of another (e.g.
+	// "count" vs "count_distinct").
+	var (
+		bestName string
+		bestFn   sdata.DBFunction
+		bestOK   bool
+	)
 	for k, v := range co.s.GetFunctions() {
 		if k == name && len(f.Args) != 0 {
 			fi.Name = k
@@ -70,20 +80,24 @@ func (co *Compiler) isFunctionEx(sel *Select, name string, f graph.Field) (
 			isFunc = true
 			return
 		}
-
-		kLen := len(k)
-		if strings.HasPrefix(name, (k + "_")) {
-			fi.Name = name[:kLen]
-			fi.Col, err = sel.Ti.GetColumn(name[(kLen + 1):])
-			if err != nil {
-				return
-			}
-			fi.Agg = true
-			fi.Func = v
-			isFunc = true
-			return
+		if strings.HasPrefix(name, k+"_") && len(k) > len(bestName) {
+			bestName = k
+			bestFn = v
+			bestOK = true
 		}
 	}
 
+	if !bestOK {
+		return
+	}
+
+	fi.Name = bestName
+	fi.Col, err = sel.Ti.GetColumn(name[len(bestName)+1:])
+	if err != nil {
+		return
+	}
+	fi.Agg = true
+	fi.Func = bestFn
+	isFunc = true
 	return
 }

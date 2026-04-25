@@ -336,6 +336,78 @@ func TestOracle11gCompileSelectEmitsAggregateColumnsInPlan(t *testing.T) {
 	}
 }
 
+func TestOracle11gWriteColumnsRendersCountDistinct(t *testing.T) {
+	d := &Oracle11gDialect{}
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "count_distinct_customer_id",
+					Func:      sdata.DBFunction{Name: "count_distinct", Type: "bigint"},
+					Args: []qcode.Arg{
+						{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "customer_id"}},
+					},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `COUNT(DISTINCT "CUSTOMER_ID") AS "COUNT_DISTINCT_CUSTOMER_ID"`) {
+		t.Fatalf("expected COUNT(DISTINCT ...) rendering, got: %s", got)
+	}
+}
+
+func TestOracle11gWriteColumnsRendersConditionalAggregate(t *testing.T) {
+	d := &Oracle11gDialect{}
+	gtCol := sdata.DBColumn{Name: "price", Table: "orders"}
+	cond := &qcode.Exp{Op: qcode.OpGreaterThan}
+	cond.Left.Col = gtCol
+	cond.Left.ColName = "price"
+	cond.Right.ValType = qcode.ValNum
+	cond.Right.Val = "10"
+
+	b := oracle11gSQLBuilder{
+		state: &oracle11gCompileState{dialect: d},
+		sel: &qcode.Select{
+			Field: qcode.Field{ID: 0, FieldName: "summary"},
+			Ti:    sdata.DBTable{Name: "orders", Schema: "public"},
+			Fields: []qcode.Field{
+				{
+					Type:      qcode.FieldTypeFunc,
+					FieldName: "expensive_count",
+					Func:      sdata.DBFunction{Name: "count", Type: "bigint"},
+					Args: []qcode.Arg{
+						{Type: qcode.ArgTypeCol, Col: sdata.DBColumn{Name: "id"}},
+					},
+					AggFilter: qcode.Filter{Exp: cond},
+				},
+			},
+			GroupCols: true,
+		},
+	}
+
+	b.initProjections()
+	got := b.build()
+
+	if !strings.Contains(got, `COUNT((CASE WHEN`) {
+		t.Fatalf("expected COUNT((CASE WHEN ...), got: %s", got)
+	}
+	if !strings.Contains(got, `THEN ("ID") END))`) {
+		t.Fatalf("expected CASE THEN col END inside COUNT, got: %s", got)
+	}
+	if !strings.Contains(got, `AS "EXPENSIVE_COUNT"`) {
+		t.Fatalf("expected aliased to EXPENSIVE_COUNT, got: %s", got)
+	}
+}
+
 func TestOracle11gAggregateWithBaseColsEmitsGroupBy(t *testing.T) {
 	d := &Oracle11gDialect{}
 	b := oracle11gSQLBuilder{

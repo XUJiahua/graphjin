@@ -6,6 +6,7 @@ type funcInfo struct {
 
 var funcList = []funcInfo{
 	{name: "count", desc: "Count the number of rows", ftype: "bigint"},
+	{name: "count_distinct", desc: "Count the number of distinct values", ftype: "bigint"},
 	{name: "sum", desc: "Calculate the sum", ftype: "bigint"},
 	{name: "avg", desc: "Calculate the average", ftype: "decimal"},
 	{name: "max", desc: "Find the maximum value", ftype: "decimal"},

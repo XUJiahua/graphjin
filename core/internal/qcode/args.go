@@ -426,6 +426,9 @@ func (co *Compiler) compileFieldArgs(sel *Select, f *Field, args []graph.Arg, ro
 		case "skipIf", "skip_if":
 			err = co.compileArgSkipIncludeIf(true, sel, f, a, role)
 
+		case "if":
+			err = co.compileArgAggIf(sel, f, a, role)
+
 		default:
 			err = unknownArg(a)
 		}
@@ -436,6 +439,28 @@ func (co *Compiler) compileFieldArgs(sel *Select, f *Field, args []graph.Arg, ro
 	}
 
 	return nil
+}
+
+// compileArgAggIf parses the `if:` argument on an aggregate field into
+// f.AggFilter. The dialect later wraps the aggregate's argument with
+// CASE WHEN <AggFilter> THEN <col> END so that e.g. count_id(if: cond)
+// becomes COUNT(CASE WHEN cond THEN id END).
+func (co *Compiler) compileArgAggIf(sel *Select, f *Field, arg graph.Arg, role string) (err error) {
+	if f.Type != FieldTypeFunc {
+		return fmt.Errorf("'if' is only valid on aggregate function fields")
+	}
+	if err = validateArg(arg, graph.NodeObj); err != nil {
+		return
+	}
+	// The condition references base columns of the aggregated table, not the
+	// alias of the outer projection — same convention as compileArgSkipIncludeIf
+	// uses for FieldTypeFunc.
+	ex, err := co.compileArgFilter(sel, -1, arg, role)
+	if err != nil {
+		return
+	}
+	addAndFilter(&f.AggFilter, ex)
+	return
 }
 
 var numArgKeyRe = regexp.MustCompile(`^[a_]\d+`)

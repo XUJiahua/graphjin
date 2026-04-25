@@ -733,6 +733,9 @@ func TestCompileQuery(t *testing.T) {
 	t.Run("distinctWithAggMultiple", distinctWithAggMultiple)
 	t.Run("distinctWithAggAndWhere", distinctWithAggAndWhere)
 	t.Run("aggWithoutDistinct", aggWithoutDistinct)
+	t.Run("aggCountDistinct", aggCountDistinct)
+	t.Run("aggCountIf", aggCountIf)
+	t.Run("aggSumIf", aggSumIf)
 	t.Run("partitionFilterInSQL", partitionFilterInSQL)
 	t.Run("warehouseColumnProjection", warehouseColumnProjection)
 }
@@ -801,6 +804,51 @@ func aggWithoutDistinct(t *testing.T) {
 		}
 	}`
 	compileGQLToPSQL(t, gql, nil, "user")
+}
+
+func aggCountDistinct(t *testing.T) {
+	gql := `query {
+		products {
+			n: count_distinct_price
+		}
+	}`
+	sql := compileGQLToPSQLString(t, gql, nil, "user")
+
+	if !bytes.Contains([]byte(sql), []byte(`count(DISTINCT `)) {
+		t.Errorf("expected count(DISTINCT ...), got: %s", sql)
+	}
+	if bytes.Contains([]byte(sql), []byte(`count_distinct(`)) {
+		t.Errorf("function name should not appear literally as count_distinct(...), got: %s", sql)
+	}
+}
+
+func aggCountIf(t *testing.T) {
+	gql := `query {
+		products {
+			expensive_count: count_id(if: { price: { gt: 10 } })
+		}
+	}`
+	sql := compileGQLToPSQLString(t, gql, nil, "user")
+
+	if !bytes.Contains([]byte(sql), []byte(`count((CASE WHEN`)) {
+		t.Errorf("expected count((CASE WHEN ...), got: %s", sql)
+	}
+	if !bytes.Contains([]byte(sql), []byte(`THEN ("products"."id") END))`)) {
+		t.Errorf("expected CASE THEN id END inside count, got: %s", sql)
+	}
+}
+
+func aggSumIf(t *testing.T) {
+	gql := `query {
+		products {
+			expensive_total: sum_price(if: { price: { gt: 10 } })
+		}
+	}`
+	sql := compileGQLToPSQLString(t, gql, nil, "user")
+
+	if !bytes.Contains([]byte(sql), []byte(`sum((CASE WHEN`)) {
+		t.Errorf("expected sum((CASE WHEN ...), got: %s", sql)
+	}
 }
 
 // compileGQLToPSQLString compiles and returns the SQL string for inspection

@@ -87,6 +87,11 @@ type oracle11gProjection struct {
 	// function arguments. AggFunc takes precedence over Col-based rendering.
 	AggFunc string
 	AggArgs []qcode.Arg
+	// AggFilter, when non-nil, wraps each aggregate argument in
+	// CASE WHEN <AggFilter> THEN <arg> END so the aggregate only consumes
+	// rows matching the condition. Sourced from Field.AggFilter (the `if:`
+	// GraphQL argument).
+	AggFilter *qcode.Exp
 }
 
 type oracle11gCompileState struct {
@@ -390,6 +395,7 @@ func (b *oracle11gSQLBuilder) initProjections() {
 			ValueType: f.Func.Type,
 			AggFunc:   f.Func.Name,
 			AggArgs:   f.Args,
+			AggFilter: f.AggFilter.Exp,
 		})
 	}
 
@@ -457,8 +463,17 @@ func (b *oracle11gSQLBuilder) writeColumns(buf *bytes.Buffer) {
 }
 
 func (b *oracle11gSQLBuilder) writeAggregate(buf *bytes.Buffer, p oracle11gProjection) {
-	buf.WriteString(strings.ToUpper(p.AggFunc))
+	name, distinct := normalizeAggName(p.AggFunc)
+	buf.WriteString(strings.ToUpper(name))
 	buf.WriteString("(")
+	if distinct {
+		buf.WriteString("DISTINCT ")
+	}
+	if p.AggFilter != nil {
+		buf.WriteString("(CASE WHEN ")
+		b.writeExp(buf, p.AggFilter)
+		buf.WriteString(" THEN (")
+	}
 	first := true
 	for _, a := range p.AggArgs {
 		if a.Name != "" {
@@ -477,7 +492,20 @@ func (b *oracle11gSQLBuilder) writeAggregate(buf *bytes.Buffer, p oracle11gProje
 			b.writeLiteral(buf, a.Val, qcode.ValStr)
 		}
 	}
+	if p.AggFilter != nil {
+		buf.WriteString(") END)")
+	}
 	buf.WriteString(")")
+}
+
+// normalizeAggName strips meta-suffixes that map to SQL modifiers rather than
+// distinct functions. Currently only "_distinct" → DISTINCT (e.g. count_distinct
+// → COUNT(DISTINCT ...)). Returns the bare aggregate name and the modifier flag.
+func normalizeAggName(name string) (base string, distinct bool) {
+	if before, ok := strings.CutSuffix(name, "_distinct"); ok {
+		return before, true
+	}
+	return name, false
 }
 
 func (b *oracle11gSQLBuilder) writeTable(buf *bytes.Buffer) {
