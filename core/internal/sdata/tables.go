@@ -19,7 +19,9 @@ import (
 // introspectionQueryTimeout bounds each individual schema-discovery SQL
 // query. Without this, a hung network read from the driver (seen with
 // go-ora against Oracle) could block a test run indefinitely.
-const introspectionQueryTimeout = 30 * time.Second
+// Set to 120s to accommodate large Oracle schemas where ALL_* dictionary
+// views can be slow (especially Oracle 11g with many objects).
+const introspectionQueryTimeout = 120 * time.Second
 
 // DBInfo holds the database schema information
 type DBInfo struct {

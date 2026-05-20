@@ -80,10 +80,10 @@ func TestParseClusteringKey(t *testing.T) {
 
 func TestAutoSetPartitionFromClustering(t *testing.T) {
 	tests := []struct {
-		name            string
-		clusteringKeys  []string
-		columns         []DBColumn
-		wantPartition   string
+		name           string
+		clusteringKeys []string
+		columns        []DBColumn
+		wantPartition  string
 	}{
 		{
 			name:           "leading temporal column becomes partition key",
@@ -218,14 +218,14 @@ func TestCompositeFKQueryConstants(t *testing.T) {
 // parses comma-separated column lists and applies normalization per DB type.
 func TestDiscoverCompositeFKsCSVParsing(t *testing.T) {
 	tests := []struct {
-		name           string
-		dbtype         string
-		localCSV       string
-		fkeyCSV        string
-		wantLocalCols  []string
-		wantFKeyCols   []string
-		wantSchema     string
-		inputSchema    string
+		name          string
+		dbtype        string
+		localCSV      string
+		fkeyCSV       string
+		wantLocalCols []string
+		wantFKeyCols  []string
+		wantSchema    string
+		inputSchema   string
 	}{
 		{
 			name:          "mysql: no normalization",
@@ -413,14 +413,14 @@ func TestHasCompositeFKCandidates(t *testing.T) {
 	}
 }
 
-// TestIntrospectionQueryTimeoutConstant pins the per-query timeout at 30s.
+// TestIntrospectionQueryTimeoutConstant pins the per-query timeout at 120s.
 // This is a defensive backstop: even if a future bad query hangs, the whole
 // GetDBInfo call must not block longer than a bounded multiple of this value.
 func TestIntrospectionQueryTimeoutConstant(t *testing.T) {
 	if introspectionQueryTimeout <= 0 {
 		t.Fatalf("introspectionQueryTimeout must be positive, got %v", introspectionQueryTimeout)
 	}
-	if introspectionQueryTimeout > 60*time.Second {
+	if introspectionQueryTimeout > 180*time.Second {
 		t.Errorf("introspectionQueryTimeout too large (%v) — defeats the purpose of a defensive timeout",
 			introspectionQueryTimeout)
 	}
@@ -583,13 +583,13 @@ func TestInferViewPKsFromBaseTables(t *testing.T) {
 		{
 			name: "view matches base table by non-PK column overlap",
 			cols: map[string]DBColumn{
-				"public:users:id":                  {Schema: "public", Table: "users", Name: "id", PrimaryKey: true},
-				"public:users:full_name":           {Schema: "public", Table: "users", Name: "full_name"},
-				"public:users:email":               {Schema: "public", Table: "users", Name: "email"},
-				"public:products:id":               {Schema: "public", Table: "products", Name: "id", PrimaryKey: true},
-				"public:products:name":             {Schema: "public", Table: "products", Name: "name"},
-				"public:user_products:id":          {Schema: "public", Table: "user_products", Name: "id"},
-				"public:user_products:full_name":   {Schema: "public", Table: "user_products", Name: "full_name"},
+				"public:users:id":                   {Schema: "public", Table: "users", Name: "id", PrimaryKey: true},
+				"public:users:full_name":            {Schema: "public", Table: "users", Name: "full_name"},
+				"public:users:email":                {Schema: "public", Table: "users", Name: "email"},
+				"public:products:id":                {Schema: "public", Table: "products", Name: "id", PrimaryKey: true},
+				"public:products:name":              {Schema: "public", Table: "products", Name: "name"},
+				"public:user_products:id":           {Schema: "public", Table: "user_products", Name: "id"},
+				"public:user_products:full_name":    {Schema: "public", Table: "user_products", Name: "full_name"},
 				"public:user_products:product_name": {Schema: "public", Table: "user_products", Name: "product_name"},
 			},
 			wantPK: []string{"public:user_products:id"},
