@@ -39,6 +39,33 @@ func (c *Conn) Ping(ctx context.Context) error {
 	return nil
 }
 
+// ResetSession forwards database/sql's pre-reuse session reset to the base
+// connection. go-ora's *Connection returns driver.ErrBadConn here once it has
+// flagged the connection bad (any network I/O failure calls setBad), which is
+// the signal database/sql uses to discard the dead connection and open a fresh
+// one. Without this forward the assertion to driver.SessionResetter fails on
+// the wrapper, go-ora's ResetSession is never called, and a connection poisoned
+// by a transient network error / Oracle idle timeout / DB restart stays in the
+// pool forever — every subsequent query then fails with "connection is already
+// closed" even though the database is healthy.
+func (c *Conn) ResetSession(ctx context.Context) error {
+	if rs, ok := c.base.(driver.SessionResetter); ok {
+		return rs.ResetSession(ctx)
+	}
+	return nil
+}
+
+// IsValid forwards the pool's pre-return validity check to the base connection
+// so a connection the driver knows is dead is dropped rather than pooled. It is
+// a no-op for drivers (like the current go-ora) that don't implement
+// driver.Validator, but keeps the wrapper from hiding the hook if they do.
+func (c *Conn) IsValid() bool {
+	if v, ok := c.base.(driver.Validator); ok {
+		return v.IsValid()
+	}
+	return true
+}
+
 func (c *Conn) CheckNamedValue(nv *driver.NamedValue) error {
 	if checker, ok := c.base.(driver.NamedValueChecker); ok {
 		return checker.CheckNamedValue(nv)
